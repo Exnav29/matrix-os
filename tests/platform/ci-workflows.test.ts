@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 describe('CI workflows', () => {
@@ -60,6 +60,77 @@ describe('CI workflows', () => {
     expect(readme).toContain('React Doctor');
     expect(readme).toContain('Docs Contract Tests');
     expect(readme).toContain('Screenshot workflow removed');
+  });
+
+  it('ships customer runtime bundles without publishing legacy Docker images', () => {
+    const root = process.cwd();
+    const workflowsDirectory = join(root, '.github/workflows');
+    const workflowReadme = readFileSync(join(workflowsDirectory, 'README.md'), 'utf8');
+    const releaseDocs = readFileSync(join(root, 'docs/dev/releases.md'), 'utf8');
+    const datedUpgradeGuide = readFileSync(
+      join(root, 'docs/dev/upgrade-2026-04-02.md'),
+      'utf8',
+    );
+    const contributorGuide = readFileSync(join(root, 'CONTRIBUTING.md'), 'utf8');
+    const orchestrator = readFileSync(join(root, 'packages/platform/src/orchestrator.ts'), 'utf8');
+    const platformCompose = readFileSync(join(root, 'distro/docker-compose.platform.yml'), 'utf8');
+    const deployStatusCommand = readFileSync(
+      join(root, '.claude/commands/deploy-status.md'),
+      'utf8',
+    );
+    const releaseCommand = readFileSync(join(root, '.claude/commands/release.md'), 'utf8');
+    const shipCommand = readFileSync(join(root, '.claude/commands/ship.md'), 'utf8');
+    const workflowSources = readdirSync(workflowsDirectory)
+      .filter((fileName) => fileName.endsWith('.yml') || fileName.endsWith('.yaml'))
+      .map((fileName) => readFileSync(join(workflowsDirectory, fileName), 'utf8'));
+
+    expect(existsSync(join(workflowsDirectory, 'docker.yml'))).toBe(false);
+    expect(existsSync(join(workflowsDirectory, 'host-bundle-release.yml'))).toBe(true);
+    expect(workflowReadme).toContain('Matrix OS does not publish customer runtime Docker images');
+    expect(workflowReadme).toContain('Docker remains supported for local development and CI validation only');
+    expect(workflowReadme).not.toContain('| `docker.yml`');
+    expect(releaseDocs).toContain('## Release Artifact Inventory');
+    expect(releaseDocs).toContain('VPS host bundle');
+    expect(releaseDocs).toContain('Platform service image');
+    expect(releaseDocs).toContain('Mobile native builds');
+    expect(releaseDocs).toContain('Mobile OTA update');
+    expect(releaseDocs).toContain('Desktop installers and OTA metadata');
+    expect(releaseDocs).toContain('`@finnaai/matrix` CLI');
+    expect(datedUpgradeGuide).toContain('procedure is retired');
+    expect(datedUpgradeGuide).toContain('[Release Process](releases.md)');
+    expect(orchestrator).toContain("image = 'matrixos-user:local'");
+    expect(platformCompose).toContain(
+      'PLATFORM_IMAGE=${PLATFORM_IMAGE:-matrixos-user:local}',
+    );
+    expect(platformCompose).toContain('image: matrixos-user:local');
+    expect(platformCompose).not.toContain(
+      'image: ${PLATFORM_IMAGE:-matrixos-user:local}',
+    );
+    expect(contributorGuide).toContain('| Host bundle | `host-bundle-release.yml`');
+    expect(contributorGuide).toContain('| Platform | `platform-cloud-run.yml`');
+    expect(contributorGuide).toContain('Customer releases are VPS-native host bundles');
+    expect(deployStatusCommand).toContain('host-bundle-release.yml');
+    expect(deployStatusCommand).toContain('platform-cloud-run.yml');
+    expect(releaseCommand).toContain('host-bundle-release.yml');
+    expect(shipCommand).toContain('host-bundle-release.yml');
+
+    for (const activeSource of [
+      contributorGuide,
+      datedUpgradeGuide,
+      orchestrator,
+      platformCompose,
+      deployStatusCommand,
+      releaseCommand,
+      shipCommand,
+    ]) {
+      expect(activeSource).not.toContain('ghcr.io/hamedmp/matrix-os');
+      expect(activeSource).not.toContain('docker.yml');
+    }
+
+    for (const workflow of workflowSources) {
+      expect(workflow).not.toContain('ghcr.io/hamedmp/matrix-os');
+      expect(workflow).not.toMatch(/packages:\s*write/);
+    }
   });
 
   it('reuses one Docker test image artifact across scenario jobs', () => {
