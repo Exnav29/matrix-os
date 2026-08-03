@@ -135,16 +135,26 @@ describe("Settings panel", () => {
         onOpenChange={() => {}}
         closeDisabled
         billingActiveOverride
-        onboardingDefaultInstalls={{ onBuild, loading: false, error: null }}
+        onboardingDefaultInstalls={{
+          onBuild,
+          loading: false,
+          error: null,
+          collectAcquisitionSource: true,
+        }}
       />,
     );
 
+    const shellBackdrop = screen.getByTestId("onboarding-shell-backdrop");
+    expect(shellBackdrop.getAttribute("src")).toContain("wallpapers/moraine-lake.jpg");
     const defaultInstallsTab = screen.getByRole("button", { name: "Default installs" });
     expect(defaultInstallsTab.getAttribute("aria-current")).toBe("page");
     expect((screen.getByRole("button", { name: "Billing Completed" }) as HTMLButtonElement).disabled).toBe(true);
     for (const label of ["Appearance", "Integrations", "System"]) {
       expect((screen.getByRole("button", { name: `${label} Unavailable until your VPS is ready` }) as HTMLButtonElement).disabled).toBe(true);
     }
+
+    fireEvent.click(screen.getByRole("radio", { name: "TikTok" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
     for (const label of ["Codex", "Claude Code", "OpenCode", "Pi"]) {
       const checkbox = screen.getByRole("checkbox", { name: label });
