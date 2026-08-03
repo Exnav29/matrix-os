@@ -12,6 +12,8 @@ import {
   MonitorIcon,
   CableIcon,
   CreditCardIcon,
+  DownloadIcon,
+  CheckCircle2Icon,
 } from "lucide-react";
 import { AppearanceSection } from "./settings/sections/AppearanceSection";
 import { AgentSection } from "./settings/sections/AgentSection";
@@ -35,6 +37,8 @@ import {
   usesCaptionButtons,
 } from "./window/title-bar-variant";
 import { DesignCaptionButtons } from "./window/DesignCaptionButtons";
+import { DefaultInstallsStep } from "./onboarding/DefaultInstallsStep";
+import type { DeveloperToolId } from "./onboarding/developer-tools";
 
 
 const sections = [
@@ -50,12 +54,14 @@ const sections = [
   { id: "system", label: "System", icon: MonitorIcon },
 ] as const;
 
-type SectionId = typeof sections[number]["id"];
+type StandardSectionId = typeof sections[number]["id"];
+type SectionId = StandardSectionId | "default-installs";
+type SettingsSection = { id: SectionId; label: string; icon: typeof PaletteIcon };
 
 // Sections temporarily hidden from the Settings nav for the paid-beta scope.
 // The section components and render branches below are intentionally kept so a
 // section can be re-enabled by removing its id here. See AGENTS.md "Deferred work".
-const HIDDEN_SECTION_IDS = new Set<SectionId>([
+const HIDDEN_SECTION_IDS = new Set<StandardSectionId>([
   "agent",
   "channels",
   "skills",
@@ -128,6 +134,11 @@ interface SettingsProps {
   onBillingCheckoutNavigate?: (url: string) => void;
   billingCheckoutReturnPath?: string;
   billingCheckoutRuntimeSlot?: string;
+  onboardingDefaultInstalls?: {
+    onBuild: (tools: DeveloperToolId[]) => void;
+    loading: boolean;
+    error: string | null;
+  };
 }
 
 export function Settings({
@@ -165,14 +176,29 @@ function SettingsFrame({
   onBillingCheckoutNavigate,
   billingCheckoutReturnPath,
   billingCheckoutRuntimeSlot,
+  onboardingDefaultInstalls,
   billingActive,
   showBillingSection,
 }: SettingsFrameProps) {
-  const resolvedDefaultSection = !showBillingSection && defaultSection === "billing" ? "appearance" : defaultSection;
+  const onboardingMode = onboardingDefaultInstalls !== undefined;
+  const resolvedDefaultSection = onboardingMode
+    ? "default-installs"
+    : !showBillingSection && defaultSection === "billing"
+      ? "appearance"
+      : defaultSection;
   const resolvedLockedSection = !showBillingSection && lockedSection === "billing" ? undefined : lockedSection;
-  const frameVisibleSections = showBillingSection
+  const standardFrameSections: SettingsSection[] = showBillingSection
     ? visibleSections
     : visibleSections.filter((section) => section.id !== "billing");
+  const frameVisibleSections: SettingsSection[] = onboardingMode
+    ? standardFrameSections.reduce<SettingsSection[]>((result, section) => {
+        result.push(section);
+        if (section.id === "billing") {
+          result.push({ id: "default-installs", label: "Default installs", icon: DownloadIcon });
+        }
+        return result;
+      }, [])
+    : standardFrameSections;
   const [activeSection, setActiveSection] = useState<SectionId>(resolvedDefaultSection);
   // Tracks the prior `open` value so the render-time section adjustment below
   // can detect the open transition. Uses the React-documented "store previous
@@ -287,12 +313,21 @@ function SettingsFrame({
             <aside className="flex w-full shrink-0 flex-col border-b border-border/40 bg-card/50 p-2 sm:w-52 sm:border-b-0 sm:border-r">
               <nav
                 aria-label="Settings sections"
-                className="flex gap-1 overflow-x-auto pb-1 sm:min-h-0 sm:flex-1 sm:flex-col sm:gap-0.5 sm:overflow-x-visible sm:overflow-y-auto sm:pb-0"
+                className="flex flex-wrap gap-1 overflow-x-auto pb-1 sm:min-h-0 sm:flex-1 sm:flex-col sm:flex-nowrap sm:gap-0.5 sm:overflow-x-visible sm:overflow-y-auto sm:pb-0"
               >
                 {frameVisibleSections.map((section) => {
                   const Icon = section.icon;
                   const active = activeSection === section.id;
-                  const locked = Boolean(resolvedLockedSection && section.id !== resolvedLockedSection);
+                  const completed = onboardingMode && section.id === "billing";
+                  const unavailable = onboardingMode && section.id !== "default-installs";
+                  const locked = unavailable || Boolean(resolvedLockedSection && section.id !== resolvedLockedSection);
+                  const accessibleLabel = completed
+                    ? `${section.label} Completed`
+                    : unavailable
+                      ? `${section.label} Unavailable until your VPS is ready`
+                      : resolvedLockedSection && locked
+                        ? `${section.label} Locked until billing is active`
+                        : section.label;
                   return (
                     <button
                       key={section.id}
@@ -301,10 +336,11 @@ function SettingsFrame({
                         if (!locked) setActiveSection(section.id);
                       }}
                       disabled={locked}
-                      aria-label={locked ? `${section.label} Locked until billing is active` : section.label}
-                      className={`flex shrink-0 items-center gap-2.5 rounded-md px-3 py-2.5 text-[13px] transition-colors sm:px-2.5 sm:py-1.5 ${
+                      aria-label={accessibleLabel}
+                      aria-current={active ? "page" : undefined}
+                      className={`flex shrink-0 items-center gap-2.5 rounded-md px-3 py-2.5 text-[13px] transition-colors sm:order-none sm:px-2.5 sm:py-1.5 ${
                         active
-                          ? "bg-ember/12 text-deep font-semibold"
+                          ? "order-first bg-ember/12 text-deep font-semibold"
                           : locked
                             ? "cursor-not-allowed text-muted-foreground/45"
                             : "text-muted-foreground hover:text-foreground hover:bg-foreground/5"
@@ -316,7 +352,10 @@ function SettingsFrame({
                         }`}
                       />
                       <span>{section.label}</span>
-                      {locked && <span className="sr-only">Locked until billing is active</span>}
+                      {completed ? (
+                        <CheckCircle2Icon className="ml-auto size-3.5 text-forest/65" aria-hidden="true" />
+                      ) : null}
+                      {locked && !onboardingMode ? <span className="sr-only">Locked until billing is active</span> : null}
                     </button>
                   );
                 })}
@@ -341,6 +380,9 @@ function SettingsFrame({
                   checkoutRuntimeSlot={billingCheckoutRuntimeSlot}
                 />
               )}
+              {activeSection === "default-installs" && onboardingDefaultInstalls ? (
+                <DefaultInstallsStep {...onboardingDefaultInstalls} />
+              ) : null}
               {activeSection === "plugins" && <PluginsSection />}
               {activeSection === "system" && <SystemSection billingActive={billingActive !== false} />}
             </main>
