@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 
 import React from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatTab from "../../desktop/src/renderer/src/features/chat/ChatTab";
 import { useBoard } from "../../desktop/src/renderer/src/stores/board";
 import { useCodingAgentWorkspace } from "../../desktop/src/renderer/src/stores/coding-agent-workspace";
 import { useHermesChat } from "../../desktop/src/renderer/src/stores/hermes-chat";
+import { useProjectView } from "../../desktop/src/renderer/src/stores/project-view";
+import { useProjectWorkspaces } from "../../desktop/src/renderer/src/stores/project-workspaces";
 import { useTabs } from "../../desktop/src/renderer/src/stores/tabs";
 import { useThreads, type AgentThread } from "../../desktop/src/renderer/src/stores/threads";
 
@@ -84,7 +86,19 @@ describe("ChatTab", () => {
     });
     useThreads.setState({ threads: [], activeThreadId: null });
     useCodingAgentWorkspace.setState({ summary: null, activeThreadId: null });
+    useProjectView.setState({ entries: {}, runtimeScope: null });
+    useProjectWorkspaces.setState({ entries: {} });
     useTabs.setState({ tabs: [], activeTabId: null });
+    Object.defineProperty(window, "operator", {
+      configurable: true,
+      value: {
+        invoke: vi.fn(async (channel: string) => {
+          if (channel === "state:set") return { ok: true };
+          throw new Error(`unexpected channel ${channel}`);
+        }),
+        on: vi.fn(() => () => undefined),
+      },
+    });
   });
 
   afterEach(() => {
@@ -122,7 +136,7 @@ describe("ChatTab", () => {
     expect(screen.getByRole("button", { name: "Server-backed run" })).toBeTruthy();
   });
 
-  it("routes a coding-agent rail selection to the Agents workspace", () => {
+  it("routes a coding-agent rail selection into the project's chats view", async () => {
     const loadThreadSnapshot = vi.fn().mockResolvedValue(undefined);
     useCodingAgentWorkspace.setState({
       summary: codingAgentSummaryFixture(),
@@ -132,10 +146,13 @@ describe("ChatTab", () => {
     render(<ChatTab />);
     fireEvent.click(screen.getByRole("button", { name: "Server-backed run" }));
 
-    expect(loadThreadSnapshot).toHaveBeenCalledWith("thread_server");
+    await waitFor(() => expect(loadThreadSnapshot).toHaveBeenCalledWith("thread_server"));
     const tabs = useTabs.getState();
-    expect(tabs.tabs.find((tab) => tab.id === tabs.activeTabId)?.kind).toBe("agents");
-    // The chat pane itself stays on Hermes; the transcript renders in the workspace.
+    const active = tabs.tabs.find((tab) => tab.id === tabs.activeTabId);
+    expect(active).toMatchObject({ kind: "project", projectSlug: "matrix-os" });
+    expect(useProjectView.getState().viewFor("matrix-os")).toBe("chats");
+    expect(useProjectView.getState().selectedThreadFor("matrix-os")).toBe("thread_server");
+    // The chat pane itself stays on Hermes; the transcript renders in the project.
     expect(screen.queryByTestId("thread-view")).toBeNull();
   });
 
