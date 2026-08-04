@@ -24,6 +24,8 @@ import {
 import { safeUrlTransform } from "../editor/MarkdownPreview";
 import { Conversation, ConversationContent } from "../chat/elements/conversation";
 import { PromptInput } from "../chat/elements/prompt-input";
+import { abortAgentThread, agentThreadAbortSupported } from "./abort-thread";
+import { ToolCallDetailMeta } from "./tool-call-detail";
 
 type ConversationStatus = "idle" | "loading" | "ready" | "error";
 type AssistantEvent = Extract<AgentThreadEvent, { type: "assistant.text.delta" | "assistant.text.completed" }>;
@@ -279,6 +281,7 @@ function ToolChip({ events }: { events: ToolEvent[] }) {
       </button>
       {open ? (
         <div className="mt-1 ml-7 border-l pl-3" style={{ borderColor: "var(--border-subtle)" }}>
+          <ToolCallDetailMeta events={events} />
           <pre className="max-h-64 overflow-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap" style={{ color: "var(--text-secondary)" }} data-selectable>
             {detail}
             {outputs.some((event) => event.truncated) ? "\nOutput was truncated for display." : ""}
@@ -425,16 +428,32 @@ function SystemEvent({ event, answeredInputs, resolvedApprovals }: {
   );
 }
 
-function ConversationComposer({ threadId, waitingForAction }: { threadId: string; waitingForAction: boolean }) {
+function ConversationComposer({
+  threadId,
+  waitingForAction,
+  threadBusy,
+}: {
+  threadId: string;
+  waitingForAction: boolean;
+  threadBusy: boolean;
+}) {
   const [message, setMessage] = useState("");
   const turnStatus = useCodingAgentWorkspace((state) => state.turnStatus);
   const turnThreadId = useCodingAgentWorkspace((state) => state.turnThreadId);
   const turnError = useCodingAgentWorkspace((state) => state.turnError);
   const send = useCodingAgentWorkspace((state) => state.sendThreadMessage);
   const submitting = turnStatus === "submitting" && turnThreadId === threadId;
+  // Abort support follows the typed operator preload bridge.
+  const abortSupported = agentThreadAbortSupported();
 
   async function submit() {
-    if (!message.trim() || submitting || waitingForAction) return;
+    if (!message.trim() || waitingForAction || submitting) return;
+    // Every submit is a direct send. A follow-up aimed at a busy conversation
+    // returns a safe recoverable conflict, which surfaces through turnError.
+    // Pending messages are durable server-owned records (SPEC 105 FR-100), and
+    // queueing must be explicit rather than silent (FR-027, FR-101), so this
+    // client deliberately keeps no local queue: a renderer-only queue would be
+    // lost on reload and invisible to the mobile, browser, and CLI shells.
     const sent = await send({ threadId, message });
     if (sent) setMessage("");
   }
@@ -449,13 +468,19 @@ function ConversationComposer({ threadId, waitingForAction }: { threadId: string
           value={message}
           onChange={setMessage}
           onSubmit={() => void submit()}
-          busy={submitting}
-          disabled={waitingForAction || submitting}
+          onAbort={abortSupported ? () => void abortAgentThread(threadId) : undefined}
+          busy={submitting || threadBusy}
+          disabled={waitingForAction}
           // Matches the CreateAgentTurnRequestSchema message cap so oversized
           // drafts are prevented client-side instead of failing generically.
           maxLength={24_000}
           ariaLabel="Message conversation"
           placeholder={waitingForAction ? "Respond to the pending request above to continue" : "Ask a follow-up…"}
+          footer={
+            threadBusy && !waitingForAction ? (
+              <span className="text-xs">Agent is working — send a follow-up once this turn finishes</span>
+            ) : undefined
+          }
         />
       </div>
     </div>
@@ -529,6 +554,7 @@ export function AgentConversationView({
           key={`composer:${snapshot.thread.id}`}
           threadId={snapshot.thread.id}
           waitingForAction={snapshot.thread.status === "waiting_for_approval" || snapshot.thread.status === "waiting_for_input"}
+          threadBusy={running}
         />
       ) : (
         <p

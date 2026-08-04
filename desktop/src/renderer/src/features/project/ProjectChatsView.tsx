@@ -1,5 +1,5 @@
 import { MessageSquare, PanelRightClose, PanelRightOpen, Server } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
 import { Group, Panel, Separator, type Layout as SplitLayout } from "react-resizable-panels";
 import { defaultAgentThreadComposerDraft } from "@matrix-os/contracts";
 import { codingAgentRuntimeScope } from "../../../../shared/coding-agent-project-workspace";
@@ -38,6 +38,35 @@ import { openCodingAgentThread } from "../../lib/project-chat";
 import { ProjectThreadList } from "./ProjectThreadList";
 
 export { mergeAttachments, mergeComposerSeed, clearComposerLaunchContext } from "../coding-agents/AgentComposer";
+
+const TYPE_TO_START_MAX_PROMPT_BYTES = 24_000;
+const TYPE_TO_START_INTERACTIVE_SELECTOR = [
+  "input",
+  "textarea",
+  "select",
+  "button",
+  "a[href]",
+  "summary",
+  "[contenteditable]:not([contenteditable='false'])",
+  "[role='button']",
+  "[role='link']",
+  "[role='menuitem']",
+  "[role='option']",
+  "[role='tab']",
+  "[role='switch']",
+  "[role='checkbox']",
+  "[role='radio']",
+  "[role='slider']",
+  "[role='spinbutton']",
+  "[role='textbox']",
+  "[role='combobox']",
+  "[role='listbox']",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
+
+function isTypeToStartInteractiveTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest(TYPE_TO_START_INTERACTIVE_SELECTOR) !== null;
+}
 
 /**
  * The project's Chats view: thread list on the left, the selected
@@ -173,29 +202,81 @@ export default function ProjectChatsView({ projectId, active }: { projectId: str
     void workspace.loadThreadSnapshot(selectedThreadId);
   }, [active, selectedThreadId, activeThreadId, threadSnapshot?.thread.id, projectId, setSelectedThread]);
 
-  async function openNewChat(
+  const openNewChat = useCallback(async (
     taskId?: string,
+    initialPrompt?: string | (() => string),
     cancelled: () => boolean = () => false,
     onReady: () => void = () => undefined,
-  ) {
-    if (!summary) return;
+  ): Promise<boolean> => {
+    if (!summary) return false;
     const relation = await resolveNewChatTarget(projectId, taskId);
-    if (cancelled()) return;
+    if (cancelled()) return false;
     onReady();
     if (!relation) {
       toast.error("Couldn't start a new chat here. Refresh the workspace and try again.");
-      return;
+      return false;
     }
+    const resolvedInitialPrompt = typeof initialPrompt === "function"
+      ? initialPrompt()
+      : initialPrompt;
     setComposerSeed({
       seedId: Date.now(),
       draft: {
         ...defaultAgentThreadComposerDraft(summary),
         ...relation,
+        ...(resolvedInitialPrompt ? { prompt: resolvedInitialPrompt } : {}),
       },
     });
     setComposerOpen(true);
     requestComposerFocus();
-  }
+    return true;
+  }, [projectId, requestComposerFocus, resolveNewChatTarget, summary]);
+  const openNewChatForTypeToStart = useEffectEvent(openNewChat);
+
+  // Type-to-start is computed before the early returns so the keydown effect
+  // stays hook-order safe; `canCreate` below is derived after them.
+  const typeToStartEnabled = summary
+    ? capabilityEnabled(summary, "codingAgentsThreadCreate") && projectWorkspaceEnabled
+    : false;
+  const typeToStartPromptByteLimit = Math.min(
+    summary?.limits.maxPromptBytes ?? TYPE_TO_START_MAX_PROMPT_BYTES,
+    TYPE_TO_START_MAX_PROMPT_BYTES,
+  );
+  const typeToStartInFlightRef = useRef(false);
+  const typeToStartBufferRef = useRef("");
+  useEffect(() => {
+    if (!active || selectedThreadId || !typeToStartEnabled || composerOpen) return;
+    typeToStartInFlightRef.current = false;
+    typeToStartBufferRef.current = "";
+    let cancelled = false;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+      if (event.key.length !== 1) return;
+      if (isTypeToStartInteractiveTarget(event.target)) return;
+      const nextBuffer = `${typeToStartBufferRef.current}${event.key}`;
+      if (new TextEncoder().encode(nextBuffer).byteLength > typeToStartPromptByteLimit) return;
+      event.preventDefault();
+      typeToStartBufferRef.current = nextBuffer;
+      if (typeToStartInFlightRef.current) return;
+      typeToStartInFlightRef.current = true;
+      void openNewChatForTypeToStart(
+        undefined,
+        () => typeToStartBufferRef.current,
+        () => cancelled,
+      ).then((started) => {
+        if (cancelled) return;
+        typeToStartBufferRef.current = "";
+        if (!started) typeToStartInFlightRef.current = false;
+      });
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      cancelled = true;
+      typeToStartBufferRef.current = "";
+      typeToStartInFlightRef.current = false;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [active, selectedThreadId, typeToStartEnabled, typeToStartPromptByteLimit, composerOpen]);
 
   useEffect(() => {
     if (!active || !composerRequest || composerRequest.projectId !== projectId) return;
@@ -211,6 +292,7 @@ export default function ProjectChatsView({ projectId, active }: { projectId: str
     }
     let cancelled = false;
     void openNewChat(
+      undefined,
       undefined,
       () => cancelled,
       () => useProjectChatLauncher.getState().consumeComposer(projectId),
@@ -311,14 +393,24 @@ export default function ProjectChatsView({ projectId, active }: { projectId: str
           canSendTurns={canSendTurns}
         />
       ) : (
-        <EmptyState
-          icon={<MessageSquare size={28} />}
-          headline="Select a chat"
-          description="Pick a conversation from the list, or start a new chat for this project."
-          action={canCreate && projectWorkspaceEnabled ? (
-            <Button variant="primary" onClick={() => void openNewChat()}>New chat</Button>
-          ) : undefined}
-        />
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <EmptyState
+            icon={<MessageSquare size={28} />}
+            headline="Select a chat"
+            description="Pick a conversation from the list, or start a new chat for this project."
+            action={canCreate && projectWorkspaceEnabled ? (
+              <Button variant="primary" onClick={() => void openNewChat()}>New chat</Button>
+            ) : undefined}
+          />
+          {typeToStartEnabled && !composerOpen ? (
+            <p
+              className="pointer-events-none absolute inset-x-0 bottom-5 text-center text-[11px]"
+              style={{ color: "var(--text-tertiary)" }}
+            >
+              Start typing to begin a new chat
+            </p>
+          ) : null}
+        </div>
       )}
     </div>
   );

@@ -230,6 +230,14 @@ export const INVOKE_CHANNELS = {
     request: CodingAgentCreateTurnRequestSchema,
     response: CodingAgentCreateTurnResultSchema,
   },
+  // Aborts one running thread. The gateway returns the authoritative aborted
+  // snapshot, so the renderer can settle the conversation even when the event
+  // stream is disconnected. The clientRequestId is minted in the main process
+  // so it always satisfies RequestIdSchema's req_ prefix.
+  "runtime:abort-thread": {
+    request: z.object({ threadId: ThreadIdSchema }).strict(),
+    response: AgentThreadSnapshotSchema,
+  },
   "state:get": {
     request: z.object({ key: z.enum(STATE_KEYS) }).strict(),
     response: z.object({ value: z.unknown() }).strict(),
