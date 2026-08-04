@@ -8,6 +8,7 @@ import {
   type RuntimeSummary,
 } from "@matrix-os/contracts";
 import { useCodingAgentWorkspace } from "../../stores/coding-agent-workspace";
+import { useDraftChat } from "../../stores/draft-chat";
 import { useProjectWorkspaces } from "../../stores/project-workspaces";
 import { useProviderPreferences } from "../settings/provider-preferences";
 import { PromptInput } from "../chat/elements/prompt-input";
@@ -16,6 +17,7 @@ import { capabilityEnabled } from "../coding-agents/capabilities";
 import { isTypeToStartInteractiveTarget } from "../coding-agents/type-to-start";
 import {
   clearComposerLaunchContext,
+  hasComposerContent,
   mergeComposerSeed,
   type ComposerSeed,
 } from "../coding-agents/composer-seed";
@@ -62,10 +64,36 @@ export function ProjectChatDraft({
       sandboxMode: defaultSandboxModeForProvider(preferred),
     };
   }, [summary, preferredProviderId]);
-  const [draft, setDraft] = useState<AgentThreadComposerDraft>(() => (
-    seed ? mergeComposerSeed(initialDraft, seed.draft) : initialDraft
-  ));
-  const providerSelectionTouchedRef = useRef(false);
+  // Selecting a thread unmounts this pane (the only route to the inspector
+  // while drafting); the session-scoped draft store keeps the composed input
+  // alive across that round trip. Picker intent is stored independently so an
+  // untouched prompt can still adopt a preference that hydrates while closed.
+  const [restoredEntry] = useState(() => useDraftChat.getState().draftEntryFor(projectId));
+  const restoredDraft = restoredEntry?.draft ?? null;
+  const [draft, setDraft] = useState<AgentThreadComposerDraft>(() => {
+    if (restoredDraft) return seed ? mergeComposerSeed(restoredDraft, seed.draft) : restoredDraft;
+    return seed ? mergeComposerSeed(initialDraft, seed.draft) : initialDraft;
+  });
+  const providerSelectionTouchedRef = useRef(restoredEntry?.pickerTouched ?? false);
+
+  useEffect(() => {
+    const store = useDraftChat.getState();
+    const hasPickerChanges = providerSelectionTouchedRef.current
+      && (draft.providerId !== initialDraft.providerId || draft.mode !== initialDraft.mode);
+    const draftToPersist = providerSelectionTouchedRef.current
+      ? draft
+      : {
+          ...draft,
+          providerId: initialDraft.providerId,
+          mode: initialDraft.mode,
+          sandboxMode: initialDraft.sandboxMode,
+        };
+    if (hasComposerContent(draftToPersist) || hasPickerChanges) {
+      store.setDraft(projectId, draftToPersist, providerSelectionTouchedRef.current);
+    } else {
+      store.clearDraft(projectId);
+    }
+  }, [projectId, draft, initialDraft]);
   const createStatus = useCodingAgentWorkspace((s) => s.createStatus);
   const createError = useCodingAgentWorkspace((s) => s.createError);
   const createThread = useCodingAgentWorkspace((s) => s.createThread);
@@ -142,6 +170,7 @@ export function ProjectChatDraft({
         return;
       }
       providerSelectionTouchedRef.current = false;
+      useDraftChat.getState().clearDraft(projectId);
       setDraft(initialDraft);
       onCreated();
     } finally {
@@ -158,7 +187,7 @@ export function ProjectChatDraft({
     <section
       aria-label={`New chat in ${projectLabel}`}
       className="ph-no-capture flex min-h-[460px] min-w-0 flex-1 flex-col overflow-hidden"
-      style={{ background: "var(--bg-primary)" }}
+      style={{ background: "var(--bg-app)" }}
       data-slot="project-chat-draft"
     >
       <ProjectChatHero
@@ -211,7 +240,7 @@ export function ProjectChatDraft({
             />
           ) : (
             <div
-              className="rounded-2xl border p-4 text-sm"
+              className="rounded-[var(--radius-xl)] border p-4 text-sm"
               style={{ borderColor: "var(--border-subtle)", background: "var(--bg-surface)", color: "var(--text-secondary)" }}
             >
               Agent runs are not available on this runtime yet.
