@@ -13,7 +13,6 @@ import { useProjectWorkspaces } from "../../desktop/src/renderer/src/stores/proj
 import { useProjectChatLauncher } from "../../desktop/src/renderer/src/lib/project-chat";
 
 const NOW = "2026-07-12T12:00:00.000Z";
-const defaultResolveNewChatTarget = useProjectWorkspaces.getState().resolveNewChatTarget;
 
 function summaryFixture(): RuntimeSummary {
   return {
@@ -76,7 +75,11 @@ function workspaceFixture({ withThreads = true }: { withThreads?: boolean } = {}
   };
 }
 
-function mockOperator({ withThreads = true }: { withThreads?: boolean } = {}) {
+function mockOperator({ withThreads = true, failFirstCreate = false }: {
+  withThreads?: boolean;
+  failFirstCreate?: boolean;
+} = {}) {
+  let createCount = 0;
   const invoke = vi.fn(async (channel: string, payload: unknown) => {
     if (channel === "runtime:get-summary") return summaryFixture();
     if (channel === "runtime:get-reviews") return { items: [], hasMore: false, limit: 50 };
@@ -84,6 +87,24 @@ function mockOperator({ withThreads = true }: { withThreads?: boolean } = {}) {
       return { attentionPush: { approval: true, input: true, failed: true, completed: true } };
     }
     if (channel === "runtime:get-project-workspace") return workspaceFixture({ withThreads });
+    if (channel === "runtime:create-thread") {
+      createCount += 1;
+      if (failFirstCreate && createCount === 1) throw new Error("provider failed");
+      const draft = payload as { projectId?: string; prompt?: string };
+      return {
+        thread: {
+          id: `thread_created_${createCount}`,
+          providerId: "codex",
+          title: draft.prompt ?? "Created chat",
+          status: "queued",
+          attention: "none",
+          projectId: draft.projectId,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+        events: { items: [], hasMore: false, limit: 200 },
+      };
+    }
     if (channel === "runtime:get-thread-snapshot") {
       const { threadId } = payload as { threadId: string };
       return {
@@ -122,10 +143,7 @@ class MockResizeObserver {
 
 function resetStores() {
   useProjectView.setState({ entries: {}, runtimeScope: null });
-  useProjectWorkspaces.setState({
-    entries: {},
-    resolveNewChatTarget: defaultResolveNewChatTarget,
-  });
+  useProjectWorkspaces.setState({ entries: {} });
   useProjectChatLauncher.setState({ composerRequest: null });
   useInspectorLayout.setState({ entries: {}, runtimeScope: null });
   useCodingAgentWorkspace.setState({
@@ -154,7 +172,7 @@ function resetStores() {
   });
 }
 
-describe("ProjectChatsView type-to-start", () => {
+describe("ProjectChatsView hero empty state", () => {
   beforeEach(() => {
     globalThis.ResizeObserver = MockResizeObserver as typeof ResizeObserver;
     resetStores();
@@ -165,119 +183,124 @@ describe("ProjectChatsView type-to-start", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows a type-to-start hint when no chat is selected", async () => {
-    // A threadless project has nothing to autoselect, so the empty Chats
-    // state (and the type-to-start affordance) persists.
+  it("renders the hero with headline, composer, and suggestion chips when no chat is selected", async () => {
     mockOperator({ withThreads: false });
     render(<ProjectChatsView projectId="matrix-os" active />);
 
-    expect(await screen.findByText("Start typing to begin a new chat")).toBeTruthy();
+    expect(await screen.findByText("What should we work on?")).toBeTruthy();
+    // The new-chat composer sits inside the hero itself.
+    expect(screen.getByLabelText("Agent run prompt")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Fix a failing test" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Review my recent changes" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Explore the codebase" })).toBeTruthy();
+    // The rail and the type-to-start affordance survive the hero swap.
+    expect(screen.getByRole("navigation", { name: "Project conversations" })).toBeTruthy();
+    expect(screen.getByText("Start typing to begin a new chat")).toBeTruthy();
+    // The old picker-style empty state is gone.
+    expect(screen.queryByText("Select a chat")).toBeNull();
   });
 
-  it("opens the new-chat composer seeded with the first typed character", async () => {
-    mockOperator({ withThreads: false });
-    render(<ProjectChatsView projectId="matrix-os" active />);
-    await screen.findByText("Start typing to begin a new chat");
-    // Flush passive effects so the window keydown listener is attached.
-    await act(async () => {});
-
-    fireEvent.keyDown(window, { key: "h" });
-
-    const prompt = (await screen.findByLabelText("Agent run prompt")) as HTMLTextAreaElement;
-    await waitFor(() => expect(prompt.value).toBe("h"));
-  });
-
-  it("buffers normal typing while the new-chat target resolves", async () => {
-    let resolveTarget!: (target: { projectId: string }) => void;
-    const resolveNewChatTarget = vi.fn(() => new Promise<{ projectId: string }>((resolve) => {
-      resolveTarget = resolve;
-    }));
-    useProjectWorkspaces.setState({ resolveNewChatTarget });
-    mockOperator({ withThreads: false });
-    render(<ProjectChatsView projectId="matrix-os" active />);
-    await screen.findByText("Start typing to begin a new chat");
-    await act(async () => {});
-
-    for (const key of "hello") fireEvent.keyDown(window, { key });
-
-    expect(resolveNewChatTarget).toHaveBeenCalledTimes(1);
-    act(() => resolveTarget({ projectId: "matrix-os" }));
-    const prompt = (await screen.findByLabelText("Agent run prompt")) as HTMLTextAreaElement;
-    await waitFor(() => expect(prompt.value).toBe("hello"));
-  });
-
-  it("ignores printable keys while a chat is selected", async () => {
+  it("keeps the rail visible and swaps only the conversation pane when threads exist but none is selected", async () => {
     mockOperator();
-    useProjectView.getState().setSelectedThread("matrix-os", "thread_plan");
     render(<ProjectChatsView projectId="matrix-os" active />);
-    await screen.findByRole("region", { name: "Conversation Plan the auth work" });
-    await act(async () => {});
 
+    // The first listed chat auto-selects, so the hero stays hidden.
+    const row = await screen.findByRole("button", { name: "Chat Plan the auth work" });
+    await screen.findByRole("region", { name: "Conversation Plan the auth work" });
+    expect(screen.queryByText("What should we work on?")).toBeNull();
+
+    act(() => {
+      useProjectView.getState().setSelectedThread("matrix-os", null);
+    });
+
+    expect(await screen.findByText("What should we work on?")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Chat Plan the auth work" })).toBe(row);
+  });
+
+  it("binds a hero-composed run to the project it advertises", async () => {
+    const { invoke } = mockOperator({ withThreads: false });
+    render(<ProjectChatsView projectId="matrix-os" active />);
+    await screen.findByText("What should we work on?");
+
+    // Typing straight into the hero never calls openNewChat, so nothing seeds
+    // the composer. The run must still land in the project the hero names,
+    // rather than falling back to a draft with no projectId.
+    const prompt = (await screen.findByLabelText("Agent run prompt")) as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: "Explain the auth flow" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "runtime:create-thread",
+        expect.objectContaining({ projectId: "matrix-os" }),
+      ),
+    );
+  });
+
+  it("keeps the advertised project context when a hero submission fails and is retried", async () => {
+    const { invoke } = mockOperator({ withThreads: false, failFirstCreate: true });
+    render(<ProjectChatsView projectId="matrix-os" active />);
+    await screen.findByText("What should we work on?");
+
+    const prompt = await screen.findByLabelText("Agent run prompt");
+    fireEvent.change(prompt, { target: { value: "Retry this in Matrix OS" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }));
+    expect(await screen.findByText("Agent run could not be started. Try again.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }));
+
+    await waitFor(() => {
+      const createCalls = invoke.mock.calls.filter(([channel]) => channel === "runtime:create-thread");
+      expect(createCalls).toHaveLength(2);
+      expect(createCalls[0]?.[1]).toEqual(expect.objectContaining({ projectId: "matrix-os" }));
+      expect(createCalls[1]?.[1]).toEqual(expect.objectContaining({ projectId: "matrix-os" }));
+    });
+  });
+
+  it("clears the persistent hero draft when a new chat is cancelled", async () => {
+    mockOperator({ withThreads: false });
+    render(<ProjectChatsView projectId="matrix-os" active />);
+    await screen.findByText("What should we work on?");
+
+    fireEvent.click(screen.getByRole("button", { name: "New chat in selected project" }));
+    const prompt = await screen.findByLabelText("Agent run prompt") as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: "Discard this draft" } });
+    expect(prompt.value).toBe("Discard this draft");
+
+    fireEvent.click(screen.getByRole("button", { name: "Close new chat composer" }));
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("Agent run prompt") as HTMLTextAreaElement).value).toBe("");
+    });
+  });
+
+  it("seeds the hero composer prompt when a suggestion chip is clicked", async () => {
+    mockOperator({ withThreads: false });
+    render(<ProjectChatsView projectId="matrix-os" active />);
+    await screen.findByText("What should we work on?");
+
+    fireEvent.click(screen.getByRole("button", { name: "Review my recent changes" }));
+
+    const prompt = (await screen.findByLabelText("Agent run prompt")) as HTMLTextAreaElement;
+    await waitFor(() => expect(prompt.value).toBe("Review my recent changes"));
+    // The chip opens the composer in place — never a second inspector copy.
+    expect(screen.getAllByLabelText("Agent run prompt")).toHaveLength(1);
+  });
+
+  it("never mounts a duplicate composer in the inspector while the hero is visible", async () => {
+    mockOperator({ withThreads: false });
+    render(<ProjectChatsView projectId="matrix-os" active />);
+    await screen.findByText("What should we work on?");
+
+    // Even after a type-to-start seed opens the composer, only the hero's
+    // instance exists.
+    await act(async () => {});
     fireEvent.keyDown(window, { key: "h" });
 
-    expect(screen.queryByLabelText("Agent run prompt")).toBeNull();
-  });
-
-  it("ignores keys typed into an editable element", async () => {
-    mockOperator({ withThreads: false });
-    render(<ProjectChatsView projectId="matrix-os" active />);
-    await screen.findByText("Start typing to begin a new chat");
-    await act(async () => {});
-
-    const foreign = document.createElement("input");
-    document.body.appendChild(foreign);
-    try {
-      fireEvent.keyDown(foreign, { key: "h" });
-    } finally {
-      foreign.remove();
-    }
-
-    // The hero composer is always rendered while no chat is selected; typing
-    // into another editable element must not seed it.
-    expect((screen.getByLabelText("Agent run prompt") as HTMLTextAreaElement).value).toBe("");
-  });
-
-  it("ignores printable keys from interactive controls and their children", async () => {
-    const resolveNewChatTarget = vi.fn(async () => ({ projectId: "matrix-os" }));
-    useProjectWorkspaces.setState({ resolveNewChatTarget });
-    mockOperator({ withThreads: false });
-    render(<ProjectChatsView projectId="matrix-os" active />);
-    await screen.findByText("Start typing to begin a new chat");
-    await act(async () => {});
-
-    const button = document.createElement("button");
-    const buttonLabel = document.createElement("span");
-    button.appendChild(buttonLabel);
-    const link = document.createElement("a");
-    link.href = "https://example.test";
-    document.body.append(button, link);
-    try {
-      fireEvent.keyDown(buttonLabel, { key: " " });
-      fireEvent.keyDown(link, { key: "x" });
-    } finally {
-      button.remove();
-      link.remove();
-    }
-
-    expect(resolveNewChatTarget).not.toHaveBeenCalled();
-    // The hero composer is always present in this slice; interaction with a
-    // nested control must leave its persistent draft untouched.
-    expect((screen.getByLabelText("Agent run prompt") as HTMLTextAreaElement).value).toBe("");
-  });
-
-  it("ignores modified and non-printable keys", async () => {
-    mockOperator({ withThreads: false });
-    render(<ProjectChatsView projectId="matrix-os" active />);
-    await screen.findByText("Start typing to begin a new chat");
-    await act(async () => {});
-
-    fireEvent.keyDown(window, { key: "h", metaKey: true });
-    fireEvent.keyDown(window, { key: "h", ctrlKey: true });
-    fireEvent.keyDown(window, { key: "Enter" });
-    fireEvent.keyDown(window, { key: "Escape" });
-
-    // The hero composer is always rendered while no chat is selected;
-    // modified or non-printable keys must not seed it.
-    expect((screen.getByLabelText("Agent run prompt") as HTMLTextAreaElement).value).toBe("");
+    await waitFor(() => {
+      expect(screen.getAllByLabelText("Agent run prompt")).toHaveLength(1);
+    });
+    const prompt = screen.getByLabelText("Agent run prompt") as HTMLTextAreaElement;
+    await waitFor(() => expect(prompt.value).toBe("h"));
   });
 });

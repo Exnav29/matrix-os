@@ -78,10 +78,24 @@ function hasComposerContent(current: AgentThreadComposerDraft): boolean {
     || Boolean(current.attachments?.length);
 }
 
-export function AgentComposer({ summary, seed, focusRequestId, onCreated }: { summary: RuntimeSummary; seed: ComposerSeed | null; focusRequestId: number; onCreated?: () => void }) {
+export function AgentComposer({ summary, seed, focusRequestId, onCreated, variant = "panel", defaultProjectId }: {
+  summary: RuntimeSummary;
+  seed: ComposerSeed | null;
+  focusRequestId: number;
+  onCreated?: () => void;
+  // "panel" keeps the inspector's titled Section card; "hero" renders the bare
+  // form as a floating prompt-card for the project Chats hero empty state.
+  variant?: "panel" | "hero";
+  // Project this composer belongs to, applied when nothing seeds the draft.
+  // Typing straight into the hero never calls openNewChat, so without this the
+  // draft falls back to defaultAgentThreadComposerDraft, which carries no
+  // projectId, and the run is created outside the advertised project.
+  defaultProjectId?: string;
+}) {
   const preferredProviderId = useProviderPreferences((s) => s.defaultProviderId);
   const initialDraft = useMemo(() => {
-    const base = defaultAgentThreadComposerDraft(summary);
+    const scoped = defaultAgentThreadComposerDraft(summary);
+    const base = defaultProjectId ? { ...scoped, projectId: defaultProjectId } : scoped;
     // Honor the saved preference only when that provider can actually start a
     // run. A provider that still needs setup or auth would otherwise replace
     // the ready default and the run would be rejected on submit.
@@ -90,7 +104,7 @@ export function AgentComposer({ summary, seed, focusRequestId, onCreated }: { su
       : undefined;
     if (!preferred) return base;
     return { ...base, providerId: preferred.id, mode: preferred.defaultMode ?? base.mode };
-  }, [summary, preferredProviderId]);
+  }, [summary, preferredProviderId, defaultProjectId]);
   const [draft, setDraft] = useState<AgentThreadComposerDraft>(initialDraft);
   const previousInitialDraftRef = useRef(initialDraft);
   const providerSelectionDirtyRef = useRef(false);
@@ -140,16 +154,15 @@ export function AgentComposer({ summary, seed, focusRequestId, onCreated }: { su
   }, [focusRequestId]);
 
   if (!canCreate) {
-    return (
-      <Section title="New Run">
-        <div
-          className="rounded-md border p-3 text-sm"
-          style={{ borderColor: "var(--border-subtle)", background: "var(--bg-surface)", color: "var(--text-secondary)" }}
-        >
-          Agent runs are not available on this runtime yet.
-        </div>
-      </Section>
+    const notice = (
+      <div
+        className="rounded-md border p-3 text-sm"
+        style={{ borderColor: "var(--border-subtle)", background: "var(--bg-surface)", color: "var(--text-secondary)" }}
+      >
+        Agent runs are not available on this runtime yet.
+      </div>
     );
+    return variant === "hero" ? notice : <Section title="New Run">{notice}</Section>;
   }
 
   const selectedProvider = summary.providers.find((provider) => provider.id === draft.providerId);
@@ -160,7 +173,12 @@ export function AgentComposer({ summary, seed, focusRequestId, onCreated }: { su
     const submittedDraft = draft;
     const threadId = await createThread(submittedDraft);
     if (!threadId) {
-      setDraft((current) => clearComposerLaunchContext(current));
+      setDraft((current) => {
+        const cleared = clearComposerLaunchContext(current);
+        // The hero's project is persistent scope, not one-shot launch context.
+        // Keep retries in the project advertised directly above the composer.
+        return defaultProjectId ? { ...cleared, projectId: defaultProjectId } : cleared;
+      });
       return;
     }
     providerSelectionDirtyRef.current = false;
@@ -169,92 +187,93 @@ export function AgentComposer({ summary, seed, focusRequestId, onCreated }: { su
     onCreated?.();
   }
 
-  return (
-    <Section title="New Run">
-      <form
-        onSubmit={(event) => void submit(event)}
-        className="grid gap-3 rounded-md border p-3"
-        style={{ borderColor: "var(--border-subtle)", background: "var(--bg-surface)" }}
-      >
-        <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_180px]">
-          <label className="grid gap-1 text-xs" style={{ color: "var(--text-tertiary)" }}>
-            Provider
-            <select
-              className="h-8 rounded-md border px-2 text-sm outline-none"
-              style={{
-                borderColor: "var(--border-subtle)",
-                background: "var(--bg-overlay)",
-                color: "var(--text-primary)",
-              }}
-              value={draft.providerId ?? ""}
-              onChange={(event) => {
-                const provider = summary.providers.find((candidate) => candidate.id === event.target.value);
-                providerSelectionDirtyRef.current = true;
-                modeSelectionDirtyRef.current = false;
-                setDraft((current) => ({
-                  ...current,
-                  providerId: provider?.id,
-                  mode: provider?.defaultMode ?? current.mode,
-                }));
-              }}
-            >
-              {summary.providers.map((provider) => (
-                <option key={provider.id} value={provider.id}>
-                  {provider.displayName}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="grid gap-1 text-xs" style={{ color: "var(--text-tertiary)" }}>
-            Mode
-            <select
-              className="h-8 rounded-md border px-2 text-sm outline-none"
-              style={{
-                borderColor: "var(--border-subtle)",
-                background: "var(--bg-overlay)",
-                color: "var(--text-primary)",
-              }}
-              value={draft.mode ?? ""}
-              onChange={(event) => {
-                const mode = modes.find((candidate) => candidate === event.target.value);
-                if (!mode) return;
-                modeSelectionDirtyRef.current = true;
-                setDraft((current) => ({ ...current, mode }));
-              }}
-            >
-              {modes.map((mode) => (
-                <option key={mode} value={mode}>
-                  {mode.replace(/_/g, " ")}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
+  const form = (
+    <form
+      onSubmit={(event) => void submit(event)}
+      className={variant === "hero"
+        ? "prompt-card grid gap-3 rounded-2xl border p-4"
+        : "grid gap-3 rounded-md border p-3"}
+      style={{ borderColor: "var(--border-subtle)", background: "var(--bg-surface)" }}
+    >
+      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_180px]">
         <label className="grid gap-1 text-xs" style={{ color: "var(--text-tertiary)" }}>
-          <span className="sr-only">Agent run prompt</span>
-          <textarea
-            ref={promptRef}
-            aria-label="Agent run prompt"
-            className="min-h-[92px] resize-y rounded-md border px-3 py-2 text-sm outline-none"
+          Provider
+          <select
+            className="h-8 rounded-md border px-2 text-sm outline-none"
             style={{
               borderColor: "var(--border-subtle)",
               background: "var(--bg-overlay)",
               color: "var(--text-primary)",
             }}
-            value={draft.prompt}
-            onChange={(event) => setDraft((current) => ({ ...current, prompt: event.target.value }))}
-          />
+            value={draft.providerId ?? ""}
+            onChange={(event) => {
+              const provider = summary.providers.find((candidate) => candidate.id === event.target.value);
+              providerSelectionDirtyRef.current = true;
+              modeSelectionDirtyRef.current = false;
+              setDraft((current) => ({
+                ...current,
+                providerId: provider?.id,
+                mode: provider?.defaultMode ?? current.mode,
+              }));
+            }}
+          >
+            {summary.providers.map((provider) => (
+              <option key={provider.id} value={provider.id}>
+                {provider.displayName}
+              </option>
+            ))}
+          </select>
         </label>
-        <div className="flex items-center justify-between gap-3">
-          <p className="min-h-5 text-sm" style={{ color: createError ? "var(--danger)" : "var(--text-tertiary)" }}>
-            {createError ?? ""}
-          </p>
-          <Button variant="primary" type="submit" disabled={createStatus === "submitting"}>
-            <Play size={14} />
-            {createStatus === "submitting" ? "Starting" : "Start run"}
-          </Button>
-        </div>
-      </form>
-    </Section>
+        <label className="grid gap-1 text-xs" style={{ color: "var(--text-tertiary)" }}>
+          Mode
+          <select
+            className="h-8 rounded-md border px-2 text-sm outline-none"
+            style={{
+              borderColor: "var(--border-subtle)",
+              background: "var(--bg-overlay)",
+              color: "var(--text-primary)",
+            }}
+            value={draft.mode ?? ""}
+            onChange={(event) => {
+              const mode = modes.find((candidate) => candidate === event.target.value);
+              if (!mode) return;
+              modeSelectionDirtyRef.current = true;
+              setDraft((current) => ({ ...current, mode }));
+            }}
+          >
+            {modes.map((mode) => (
+              <option key={mode} value={mode}>
+                {mode.replace(/_/g, " ")}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <label className="grid gap-1 text-xs" style={{ color: "var(--text-tertiary)" }}>
+        <span className="sr-only">Agent run prompt</span>
+        <textarea
+          ref={promptRef}
+          aria-label="Agent run prompt"
+          className="min-h-[92px] resize-y rounded-md border px-3 py-2 text-sm outline-none"
+          style={{
+            borderColor: "var(--border-subtle)",
+            background: "var(--bg-overlay)",
+            color: "var(--text-primary)",
+          }}
+          value={draft.prompt}
+          onChange={(event) => setDraft((current) => ({ ...current, prompt: event.target.value }))}
+        />
+      </label>
+      <div className="flex items-center justify-between gap-3">
+        <p className="min-h-5 text-sm" style={{ color: createError ? "var(--danger)" : "var(--text-tertiary)" }}>
+          {createError ?? ""}
+        </p>
+        <Button variant="primary" type="submit" disabled={createStatus === "submitting"}>
+          <Play size={14} />
+          {createStatus === "submitting" ? "Starting" : "Start run"}
+        </Button>
+      </div>
+    </form>
   );
+  return variant === "hero" ? form : <Section title="New Run">{form}</Section>;
 }
