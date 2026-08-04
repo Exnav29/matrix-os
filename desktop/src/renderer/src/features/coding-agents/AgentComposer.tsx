@@ -2,11 +2,13 @@ import { Play } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   defaultAgentThreadComposerDraft,
+  providerReady,
   type AgentThreadComposerDraft,
   type RuntimeSummary,
 } from "@matrix-os/contracts";
 import { Button } from "../../design/primitives";
 import { useCodingAgentWorkspace } from "../../stores/coding-agent-workspace";
+import { useProviderPreferences } from "../settings/provider-preferences";
 import { AgentWorkspaceSection as Section } from "./AgentWorkspaceSection";
 import { capabilityEnabled } from "./capabilities";
 
@@ -77,8 +79,22 @@ function hasComposerContent(current: AgentThreadComposerDraft): boolean {
 }
 
 export function AgentComposer({ summary, seed, focusRequestId, onCreated }: { summary: RuntimeSummary; seed: ComposerSeed | null; focusRequestId: number; onCreated?: () => void }) {
-  const initialDraft = useMemo(() => defaultAgentThreadComposerDraft(summary), [summary]);
+  const preferredProviderId = useProviderPreferences((s) => s.defaultProviderId);
+  const initialDraft = useMemo(() => {
+    const base = defaultAgentThreadComposerDraft(summary);
+    // Honor the saved preference only when that provider can actually start a
+    // run. A provider that still needs setup or auth would otherwise replace
+    // the ready default and the run would be rejected on submit.
+    const preferred = preferredProviderId
+      ? summary.providers.find((provider) => provider.id === preferredProviderId && providerReady(provider))
+      : undefined;
+    if (!preferred) return base;
+    return { ...base, providerId: preferred.id, mode: preferred.defaultMode ?? base.mode };
+  }, [summary, preferredProviderId]);
   const [draft, setDraft] = useState<AgentThreadComposerDraft>(initialDraft);
+  const previousInitialDraftRef = useRef(initialDraft);
+  const providerSelectionDirtyRef = useRef(false);
+  const modeSelectionDirtyRef = useRef(false);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const createStatus = useCodingAgentWorkspace((s) => s.createStatus);
   const createError = useCodingAgentWorkspace((s) => s.createError);
@@ -86,13 +102,37 @@ export function AgentComposer({ summary, seed, focusRequestId, onCreated }: { su
   const canCreate = capabilityEnabled(summary, "codingAgentsThreadCreate");
 
   useEffect(() => {
-    setDraft((current) => hasComposerContent(current) ? current : initialDraft);
+    const previousInitialDraft = previousInitialDraftRef.current;
+    previousInitialDraftRef.current = initialDraft;
+    setDraft((current) => {
+      if (!hasComposerContent(current)
+        && !providerSelectionDirtyRef.current
+        && !modeSelectionDirtyRef.current) return initialDraft;
+      // Project/task seeds are launch context, not a provider choice. When the
+      // persisted preference hydrates after that context arrives, update only
+      // an untouched automatic selection and preserve the seeded fields.
+      const followsPreviousDefault = !providerSelectionDirtyRef.current
+        && current.providerId === previousInitialDraft.providerId;
+      if (!followsPreviousDefault) return current;
+      const providerChanged = initialDraft.providerId !== previousInitialDraft.providerId;
+      const followsPreviousMode = !modeSelectionDirtyRef.current
+        && current.mode === previousInitialDraft.mode;
+      return {
+        ...current,
+        providerId: initialDraft.providerId,
+        mode: providerChanged || followsPreviousMode ? initialDraft.mode : current.mode,
+      };
+    });
   }, [initialDraft]);
 
   useEffect(() => {
     if (!seed) return;
     setDraft((current) => mergeComposerSeed(current, seed.draft));
   }, [seed]);
+
+  useEffect(() => {
+    void useProviderPreferences.getState().hydrate();
+  }, []);
 
   useEffect(() => {
     if (focusRequestId <= 0) return;
@@ -123,6 +163,8 @@ export function AgentComposer({ summary, seed, focusRequestId, onCreated }: { su
       setDraft((current) => clearComposerLaunchContext(current));
       return;
     }
+    providerSelectionDirtyRef.current = false;
+    modeSelectionDirtyRef.current = false;
     setDraft(initialDraft);
     onCreated?.();
   }
@@ -147,6 +189,8 @@ export function AgentComposer({ summary, seed, focusRequestId, onCreated }: { su
               value={draft.providerId ?? ""}
               onChange={(event) => {
                 const provider = summary.providers.find((candidate) => candidate.id === event.target.value);
+                providerSelectionDirtyRef.current = true;
+                modeSelectionDirtyRef.current = false;
                 setDraft((current) => ({
                   ...current,
                   providerId: provider?.id,
@@ -174,6 +218,7 @@ export function AgentComposer({ summary, seed, focusRequestId, onCreated }: { su
               onChange={(event) => {
                 const mode = modes.find((candidate) => candidate === event.target.value);
                 if (!mode) return;
+                modeSelectionDirtyRef.current = true;
                 setDraft((current) => ({ ...current, mode }));
               }}
             >
