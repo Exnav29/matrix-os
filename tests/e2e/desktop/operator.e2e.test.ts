@@ -3,6 +3,7 @@
 // stub gateway — no VPS, no credentials, screenshots saved as evidence
 // (lesson L12: the agent can finally verify the running app).
 import { mkdtempSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -10,6 +11,8 @@ import { _electron, type ElectronApplication, type Page } from "playwright";
 import { startStubGateway, type StubGateway } from "./fixtures/stub-gateway";
 
 const DESKTOP_MAIN = resolve(__dirname, "../../../desktop/out/main/index.js");
+const desktopRequire = createRequire(resolve(__dirname, "../../../desktop/package.json"));
+const ELECTRON_EXECUTABLE = desktopRequire("electron") as string;
 const SCREENSHOT_DIR = resolve(__dirname, "../../../desktop/screenshots");
 const hasBuild = existsSync(DESKTOP_MAIN);
 
@@ -33,6 +36,7 @@ suite("operator desktop e2e", () => {
     gateway = await startStubGateway();
     userDataDir = mkdtempSync(join(tmpdir(), "operator-e2e-"));
     app = await _electron.launch({
+      executablePath: ELECTRON_EXECUTABLE,
       args: [DESKTOP_MAIN],
       env: {
         ...process.env,
@@ -60,9 +64,9 @@ suite("operator desktop e2e", () => {
   });
 
   it("signs in via the device flow and reaches Home, then opens a project board", async () => {
-    // "Continue with GitHub" unambiguously starts the device flow (the browser
-    // would present the provider). The stub approves instantly.
-    await page.getByRole("button", { name: /continue with github/i }).click();
+    // Browser sign-in unambiguously starts the device flow; the approval page
+    // presents the available providers and the stub approves instantly.
+    await page.getByRole("button", { name: /continue in browser/i }).click();
     // Poll loop approves; the signed-in shell (sidebar nav) renders.
     await page.locator("aside button", { hasText: "Terminal" }).first().waitFor({ timeout: 15_000 });
     expect(gateway.state.tokenRequests).toBeGreaterThan(0);
@@ -328,4 +332,31 @@ suite("operator desktop e2e", () => {
     await page.getByRole("button", { name: "New chat in Matrix OS" }).waitFor({ timeout: 10_000 });
     await page.screenshot({ path: join(SCREENSHOT_DIR, "18-chat-rail-routes-to-project.png") });
   }, 30_000);
+
+  it("archives, restores, and permanently deletes a project through Desktop lifecycle controls", async () => {
+    await page.locator("aside button", { hasText: "Home" }).first().click();
+    await expect.poll(attachedNativeViewCount).toBe(1);
+    await page.getByRole("button", { name: "Project actions for Matrix OS" }).click();
+    await expect.poll(attachedNativeViewCount).toBe(0);
+    await page.getByText("Archive project", { exact: true }).click();
+    await expect.poll(() => page.getByRole("button", { name: "Open Matrix OS" }).count()).toBe(0);
+
+    await page.locator("aside button", { hasText: "Settings" }).first().click();
+    const settingsNav = page.locator("nav", { has: page.getByRole("heading", { name: "Settings" }) });
+    await settingsNav.getByRole("button", { name: "Projects" }).click();
+    await page.getByRole("heading", { name: "Archived projects" }).waitFor({ timeout: 10_000 });
+    await page.getByText("GitHub repository").waitFor();
+    await page.screenshot({ path: join(SCREENSHOT_DIR, "19-archived-projects-settings.png") });
+
+    await page.getByRole("button", { name: "Restore Matrix OS" }).click();
+    await page.getByText("No archived projects").waitFor({ timeout: 10_000 });
+    await page.getByRole("button", { name: "Open Matrix OS" }).waitFor();
+
+    await page.getByRole("button", { name: "Project actions for Matrix OS" }).click();
+    await page.getByText("Delete project", { exact: true }).click();
+    await page.getByLabel("Type Matrix OS to confirm").fill("Matrix OS");
+    await page.screenshot({ path: join(SCREENSHOT_DIR, "20-delete-project-confirmation.png") });
+    await page.getByRole("button", { name: "Delete project" }).click();
+    await page.getByRole("button", { name: "Open Matrix OS" }).waitFor({ state: "detached", timeout: 10_000 });
+  }, 40_000);
 });

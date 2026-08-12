@@ -35,6 +35,8 @@ export interface Card {
 export interface Project {
   slug: string;
   name: string;
+  kind: "scratch" | "github" | "folder";
+  archivedAt?: string;
   localPath?: string;
   githubBacked?: boolean;
 }
@@ -72,15 +74,19 @@ const WireProjectSchema = z.object({
   slug: z.string().min(1),
   name: z.string().min(1),
   localPath: z.string().min(1).optional(),
+  kind: z.enum(["scratch", "github", "folder"]).optional(),
+  archivedAt: z.string().datetime().optional(),
   github: z.object({ owner: z.string(), repo: z.string() }).passthrough().optional(),
 });
 
-function toProject(raw: unknown): Project | null {
+export function parseProject(raw: unknown): Project | null {
   const parsed = WireProjectSchema.safeParse(raw);
   if (!parsed.success) return null;
   return {
     slug: parsed.data.slug,
     name: parsed.data.name,
+    kind: parsed.data.kind ?? (parsed.data.github ? "github" : "scratch"),
+    ...(parsed.data.archivedAt ? { archivedAt: parsed.data.archivedAt } : {}),
     ...(parsed.data.localPath
       ? { localPath: parsed.data.localPath, githubBacked: parsed.data.github !== undefined }
       : {}),
@@ -234,6 +240,7 @@ interface BoardState {
   archiveTask(api: ApiClient, slug: string, taskId: string): Promise<void>;
   deleteTask(api: ApiClient, slug: string, taskId: string): Promise<void>;
   applyTaskEvent(event: TaskEventCreated | TaskEventUpdated): void;
+  removeProjectState(slug: string): void;
 }
 
 export const useBoard = create<BoardState>()((set, get) => {
@@ -318,7 +325,7 @@ export const useBoard = create<BoardState>()((set, get) => {
         if (!isCurrentRuntimeGeneration(runtimeGeneration)) return false;
         const projects: Project[] = [];
         for (const raw of response.projects ?? []) {
-          const project = toProject(raw);
+          const project = parseProject(raw);
           if (project) projects.push(project);
         }
         set({ projects, error: null });
@@ -358,7 +365,7 @@ export const useBoard = create<BoardState>()((set, get) => {
           res = await sendCreate(PROJECT_CREATE_RETRY_TIMEOUT_MS);
         }
         if (!isCurrentRuntimeGeneration(runtimeGeneration)) return null;
-        const project = toProject(res.project);
+        const project = parseProject(res.project);
         if (!project) {
           const refreshed = await get().loadProjects(api);
           set({ error: refreshed ? "server" : get().error });
@@ -512,6 +519,21 @@ export const useBoard = create<BoardState>()((set, get) => {
           console.error("[board] Task delete failed:", err);
           set({ error: categoryOf(err) });
         }
+      });
+    },
+
+    removeProjectState: (slug) => {
+      set((state) => {
+        const cardsByProject = { ...state.cardsByProject };
+        const firstLoadByProject = { ...state.firstLoadByProject };
+        delete cardsByProject[slug];
+        delete firstLoadByProject[slug];
+        return {
+          projects: state.projects.filter((project) => project.slug !== slug),
+          activeProjectSlug: state.activeProjectSlug === slug ? null : state.activeProjectSlug,
+          cardsByProject,
+          firstLoadByProject,
+        };
       });
     },
 

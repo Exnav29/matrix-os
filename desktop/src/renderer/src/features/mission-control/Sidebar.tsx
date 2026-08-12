@@ -25,6 +25,7 @@ import { kernelThreadAttentionCount } from "../../stores/unified-threads";
 import { useUi } from "../../stores/ui";
 import RuntimeComputerMenu from "../runtime/RuntimeComputerMenu";
 import DesktopUpdateButton from "../updates/DesktopUpdateButton";
+import ProjectSidebarRow from "./ProjectSidebarRow";
 
 function NavRow({
   icon,
@@ -180,14 +181,12 @@ export default function Sidebar() {
                   const isActive = activeTab?.kind === "project" && activeTab.projectSlug === project.slug;
                   const attention = summaryProjects?.find((candidate) => candidate.id === project.slug)?.attentionCount ?? 0;
                   return (
-                    <NavRow
+                    <ProjectSidebarRow
                       key={project.slug}
-                      icon={<span className="text-xs">▣</span>}
-                      label={project.name || project.slug}
-                      collapsed={false}
+                      project={project}
                       active={isActive}
-                      badge={attention > 0 ? attention : undefined}
-                      onClick={() => openTab({ kind: "project", projectSlug: project.slug, title: project.name || project.slug })}
+                      attention={attention}
+                      onOpen={() => openTab({ kind: "project", projectSlug: project.slug, title: project.name || project.slug })}
                     />
                   );
                 })
