@@ -46,6 +46,12 @@ import {
   boundedListSchema,
 } from "@matrix-os/contracts";
 import { CodingAgentProjectWorkspaceRequestSchema } from "./coding-agent-project-workspace";
+import {
+  DesktopReleaseNotesSchema,
+  DesktopUpdateSnapshotSchema,
+  DesktopUpdateStatusSchema,
+  DesktopUpdateVersionSchema,
+} from "./desktop-update";
 
 const Empty = z.object({}).strict();
 
@@ -358,9 +364,28 @@ export const INVOKE_CHANNELS = {
   },
   "update:check": {
     request: Empty,
+    response: z.object({ status: DesktopUpdateStatusSchema }).strict(),
+  },
+  "update:get-state": {
+    request: Empty,
+    response: DesktopUpdateSnapshotSchema,
+  },
+  "update:install": {
+    request: Empty,
+    response: Ok,
+  },
+  "update:get-whats-new": {
+    request: Empty,
     response: z
-      .object({ status: z.enum(["disabled", "checking", "up-to-date", "downloading", "ready", "error"]) })
+      .object({
+        release: DesktopReleaseNotesSchema.nullable(),
+        shouldOpen: z.boolean(),
+      })
       .strict(),
+  },
+  "update:acknowledge-whats-new": {
+    request: z.object({ version: DesktopUpdateVersionSchema }).strict(),
+    response: Ok,
   },
 } as const;
 
@@ -391,6 +416,7 @@ export const EVENT_CHANNELS = {
   }).strict(),
   "update:available": z.object({ version: z.string().max(64) }).strict(),
   "update:ready": z.object({ version: z.string().max(64) }).strict(),
+  "update:state-changed": DesktopUpdateSnapshotSchema,
   "window:focus-changed": z.object({ focused: z.boolean() }).strict(),
   "app:zoom-changed": ZoomFactorResultSchema,
   "menu:action": z

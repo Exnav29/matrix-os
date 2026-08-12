@@ -78,6 +78,7 @@ export function Dialog({
   title = "Dialog",
   role = "dialog",
   placement = "top",
+  top = "18vh",
 }: {
   open: boolean;
   onClose: () => void;
@@ -86,6 +87,7 @@ export function Dialog({
   title?: string;
   role?: "dialog" | "alertdialog";
   placement?: "top" | "center";
+  top?: string;
 }) {
   return (
     <RadixDialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
@@ -95,10 +97,11 @@ export function Dialog({
           role={role}
           aria-describedby={undefined}
           className={`fade-in fixed left-1/2 z-50 rounded-xl border focus:outline-none ${
-            placement === "center" ? "" : "top-[18vh] -translate-x-1/2"
+            placement === "center" ? "" : "-translate-x-1/2"
           }`}
           style={{
             width,
+            maxWidth: "calc(100vw - 32px)",
             background: "var(--bg-overlay)",
             borderColor: "var(--border-default)",
             boxShadow: "var(--shadow-3)",
@@ -106,7 +109,7 @@ export function Dialog({
               top: "50%",
               transform: "translate(-50%, -50%)",
               maxHeight: "calc(100vh - 32px)",
-            } : {}),
+            } : { top }),
           }}
         >
           <RadixDialog.Title className="sr-only">{title}</RadixDialog.Title>
