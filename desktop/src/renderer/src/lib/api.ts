@@ -42,7 +42,7 @@ export interface ApiClient {
   post<T>(path: string, body: unknown, options?: RequestTimeoutOptions): Promise<T>;
   postBytes<T>(path: string, body: Blob, headers: Record<string, string>, options?: RequestTimeoutOptions): Promise<T>;
   patch<T>(path: string, body: unknown): Promise<T>;
-  put<T>(path: string, body: unknown): Promise<T>;
+  put<T>(path: string, body: unknown, options?: RequestTimeoutOptions): Promise<T>;
   putBytes<T>(path: string, body: Blob, headers: Record<string, string>, options?: RequestTimeoutOptions): Promise<T>;
   delete<T>(path: string): Promise<T>;
   putText<T>(path: string, body: string): Promise<T>;
@@ -166,12 +166,12 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       }),
-    put: (path, body) =>
+    put: (path, body, requestOptions) =>
       request(path, {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
-      }),
+      }, requestOptions),
     putBytes: (path, body, headers, requestOptions) =>
       request(path, { method: "PUT", headers, body }, requestOptions),
     // The gateway task DELETE route parses the JSON body unconditionally, so a
