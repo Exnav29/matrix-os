@@ -374,6 +374,9 @@ export async function createGateway(config: GatewayConfig) {
         generationLockHelperPath: "/opt/matrix/bin/matrix-terminal-generation-gc.py",
       })
     : null;
+  if (userSystemdTerminalController) {
+    await userSystemdTerminalController.assertInstallationReady();
+  }
   const workspaceZellijRuntime = userSystemdTerminalController && terminalRuntimeGeneration
     ? createUserSystemdZellijRuntime({
         homePath,
@@ -1788,7 +1791,7 @@ export async function createGateway(config: GatewayConfig) {
     && process.env.MATRIX_RUNTIME_SLOT === runtimeHandle;
   if (terminalAcceptanceEnabled) {
     app.route("/api/internal/terminal-acceptance", createTerminalAcceptanceRoutes({
-      secret: process.env.UPGRADE_TOKEN ?? "",
+      secret: () => process.env.UPGRADE_TOKEN ?? "",
       run: (input) => shellCommandRunner.run(input),
     }));
   }
