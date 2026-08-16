@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   MessageSquare,
   MessageSquarePlus,
@@ -43,16 +43,13 @@ function ConversationRow({
   const loadingConversationId = useHermesChat((state) => state.loadingConversationId);
   const deletingConversationId = useHermesChat((state) => state.deletingConversationId);
   const openConversation = useHermesChat((state) => state.openConversation);
-  const recordRecentConversation = useTabs((state) => state.recordRecentConversation);
   const running = conversation.id === sessionId && status !== "idle";
   const loading = loadingConversationId === conversation.id;
   const deleting = deletingConversationId === conversation.id;
   const runningDescriptionId = `delete-running-${conversation.id}`;
   const openSelectedConversation = async () => {
     if (!api) return;
-    if (await openConversation(api, conversation.id)) {
-      recordRecentConversation(conversation.id, conversation.title);
-    }
+    await openConversation(api, conversation.id);
   };
 
   return (
@@ -112,6 +109,7 @@ function HermesConversationIndexContent({ api }: { api: ApiClient | null }) {
   const [query, setQuery] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<HermesConversationSummary | null>(null);
   const conversations = useHermesChat((state) => state.conversations);
+  const isConversationIndexComplete = useHermesChat((state) => state.isConversationIndexComplete);
   const indexStatus = useHermesChat((state) => state.indexStatus);
   const indexError = useHermesChat((state) => state.indexError);
   const deletingConversationId = useHermesChat((state) => state.deletingConversationId);
@@ -120,11 +118,17 @@ function HermesConversationIndexContent({ api }: { api: ApiClient | null }) {
   const createConversation = useHermesChat((state) => state.createConversation);
   const deleteConversation = useHermesChat((state) => state.deleteConversation);
   const clearDeleteError = useHermesChat((state) => state.clearDeleteError);
-  const recordRecentConversation = useTabs((state) => state.recordRecentConversation);
+  const removeRecentView = useTabs((state) => state.removeRecentView);
+  const reconcileRecentHermesConversations = useTabs((state) => state.reconcileRecentHermesConversations);
   const filteredConversations = useMemo(
     () => filterConversations(conversations, query),
     [conversations, query],
   );
+
+  useEffect(() => {
+    if (indexStatus !== "ready" || !isConversationIndexComplete) return;
+    reconcileRecentHermesConversations(conversations.map((conversation) => conversation.id));
+  }, [conversations, indexStatus, isConversationIndexComplete, reconcileRecentHermesConversations]);
 
   const closeSearch = () => {
     setQuery("");
@@ -138,15 +142,13 @@ function HermesConversationIndexContent({ api }: { api: ApiClient | null }) {
   const confirmDelete = async () => {
     if (!api || !deleteTarget) return;
     if (await deleteConversation(api, deleteTarget.id)) {
+      removeRecentView("conversation", deleteTarget.id);
       setDeleteTarget(null);
     }
   };
   const startConversation = async () => {
     if (!api) return;
-    const id = await createConversation(api);
-    if (!id) return;
-    const created = useHermesChat.getState().conversations.find((item) => item.id === id);
-    recordRecentConversation(id, created?.title ?? "New chat");
+    await createConversation(api);
   };
 
   return (
