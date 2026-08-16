@@ -1,6 +1,6 @@
 // Canonical routing for opening coding-agent chats in the project-centric
 // shell. A chat always opens inside its project tab (Chats view active) —
-// notifications, the command palette, the chat rail, and future panels all
+// notifications, global Recents, the command palette, and future panels all
 // funnel through openProjectChat so there is exactly one way to land on a
 // conversation.
 import { create } from "zustand";
@@ -18,6 +18,9 @@ export interface OpenProjectChatOptions {
   threadId?: string | null;
   // Open the new-chat composer for the project once the view is visible.
   compose?: boolean;
+  // Unknown threads may still open under a best-effort fallback project, but
+  // that unverified route must never become a persistent global Recent.
+  recordRecent?: boolean;
 }
 
 interface ProjectChatLauncherState {
@@ -66,7 +69,77 @@ function projectTitleFor(projectId: string): string {
   return summaryProject?.label ?? projectId;
 }
 
-export function openProjectChat(projectId: string, options: OpenProjectChatOptions = {}): void {
+function conversationTitleFor(threadId: string): string {
+  const workspace = useCodingAgentWorkspace.getState();
+  const summaryThread = [
+    ...(workspace.summary?.attentionThreads.items ?? []),
+    ...(workspace.summary?.activeThreads.items ?? []),
+  ].find((thread) => thread.id === threadId);
+  if (summaryThread?.title) return summaryThread.title;
+  if (workspace.threadSnapshot?.thread.id === threadId) {
+    return workspace.threadSnapshot.thread.title;
+  }
+  for (const entry of Object.values(useProjectWorkspaces.getState().entries)) {
+    const projectWorkspace = entry.workspace;
+    if (!projectWorkspace) continue;
+    const listed = [
+      ...projectWorkspace.projectThreads.items,
+      ...projectWorkspace.taskThreads.items,
+    ].find((thread) => thread.id === threadId);
+    if (listed?.title) return listed.title;
+  }
+  return "Agent conversation";
+}
+
+/**
+ * Loads the project and thread projections that make a coding-agent route
+ * durable. The stores normalize failures into explicit state, so success must
+ * be verified after both awaited operations instead of inferred from a
+ * resolved Promise.
+ */
+export async function loadCodingAgentConversation(
+  projectId: string,
+  threadId: string,
+): Promise<boolean> {
+  const runtimeGeneration = captureRuntimeGeneration();
+  try {
+    await useProjectWorkspaces.getState().ensure(projectId);
+  } catch (err: unknown) {
+    console.warn("[project-chat] project workspace open failed:", diagnosticErrorKind(err));
+  }
+  if (!isCurrentRuntimeGeneration(runtimeGeneration)) return false;
+
+  const current = useCodingAgentWorkspace.getState();
+  const alreadyLoaded = current.activeThreadId === threadId
+    && current.threadSnapshotStatus === "ready"
+    && current.threadSnapshot?.thread.id === threadId;
+  if (!alreadyLoaded) {
+    try {
+      await current.loadThreadSnapshot(threadId);
+    } catch (err: unknown) {
+      console.warn("[project-chat] thread open failed:", diagnosticErrorKind(err));
+      return false;
+    }
+  }
+  if (!isCurrentRuntimeGeneration(runtimeGeneration)) return false;
+  // A same-project refresh can supersede the workspace after ensure() settles
+  // while the thread snapshot is still loading. Re-read the authoritative
+  // entry here so a transient loading/error state cannot persist a broken
+  // conversation Recent.
+  const projectWorkspace = useProjectWorkspaces.getState().entries[projectId];
+  const loaded = useCodingAgentWorkspace.getState();
+  return projectWorkspace?.status === "ready"
+    && projectWorkspace.workspace?.project.id === projectId
+    && loaded.activeThreadId === threadId
+    && loaded.threadSnapshotStatus === "ready"
+    && loaded.threadSnapshot?.thread.id === threadId
+    && loaded.threadSnapshot.thread.projectId === projectId;
+}
+
+export async function openProjectChat(
+  projectId: string,
+  options: OpenProjectChatOptions = {},
+): Promise<boolean> {
   const projectView = useProjectView.getState();
   projectView.setView(projectId, "chats");
   // Only an explicit thread updates the selection; a bare open keeps the
@@ -79,26 +152,27 @@ export function openProjectChat(projectId: string, options: OpenProjectChatOptio
     projectSlug: projectId,
     title: projectTitleFor(projectId),
   });
-  // ensure() records load failures in its own entry state and never rejects.
-  void useProjectWorkspaces.getState().ensure(projectId);
-  if (options.threadId) {
-    const workspace = useCodingAgentWorkspace.getState();
-    if (workspace.activeThreadId !== options.threadId) {
-      workspace.loadThreadSnapshot(options.threadId).catch((err: unknown) => {
-        console.warn(
-          "[project-chat] thread open failed:",
-          diagnosticErrorKind(err),
-        );
-      });
-    }
-  }
   if (options.compose) {
     useProjectChatLauncher.getState().requestComposer(projectId);
   }
+  if (!options.threadId) {
+    // Preserve the existing fire-and-forget project bootstrap for non-thread
+    // navigation; there is no conversation Recent to gate in this path.
+    void useProjectWorkspaces.getState().ensure(projectId);
+    return true;
+  }
+  const opened = await loadCodingAgentConversation(projectId, options.threadId);
+  if (opened && options.recordRecent !== false) {
+    useTabs.getState().recordRecentConversation(
+      options.threadId,
+      conversationTitleFor(options.threadId),
+    );
+  }
+  return opened;
 }
 
 /**
- * Routes a coding-agent thread (notification, palette, chat rail) into its
+ * Routes a coding-agent thread (notification, palette, or Recents) into its
  * project context. The project is resolved from the runtime summary or the
  * already-loaded snapshot; when neither knows it, the default project is a
  * best-effort fallback so the conversation still opens somewhere sensible.
@@ -145,6 +219,7 @@ export async function openCodingAgentThread(threadId: string): Promise<void> {
   // to be active; the snapshot later reveals the real projectId but nothing
   // reroutes, so the chat stays selected and persisted under the wrong project.
   const known = listed?.projectId ?? snapshotProjectId ?? workspaceProjectId;
+  let resolvedAuthoritatively = known !== undefined;
   let projectId = known;
   if (!projectId) {
     const runtimeGeneration = captureRuntimeGeneration();
@@ -156,10 +231,14 @@ export async function openCodingAgentThread(threadId: string): Promise<void> {
     // Only guess when the runtime genuinely could not resolve it. The guess
     // opens the chat under whichever project is active and nothing reroutes.
     projectId = resolved ?? defaultProjectId() ?? undefined;
+    resolvedAuthoritatively = resolved !== undefined;
   }
   if (!projectId) {
     console.warn("[project-chat] cannot open a thread before any project exists");
     return;
   }
-  openProjectChat(projectId, { threadId });
+  await openProjectChat(projectId, {
+    threadId,
+    recordRecent: resolvedAuthoritatively,
+  });
 }

@@ -15,6 +15,7 @@ import {
   useHermesChat,
   type HermesConversationSummary,
 } from "@desktop/renderer/src/stores/hermes-chat";
+import { useTabs } from "@desktop/renderer/src/stores/tabs";
 
 const conversations: HermesConversationSummary[] = [
   {
@@ -69,6 +70,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  useTabs.setState(useTabs.getInitialState(), true);
   useHermesChat.setState(useHermesChat.getInitialState(), true);
   useHermesChat.setState({
     conversations,
@@ -111,6 +113,20 @@ describe("HermesConversationIndex", () => {
     fireEvent.keyDown(search, { key: "Escape" });
     expect(screen.queryByRole("searchbox", { name: "Search chats" })).toBeNull();
     expect(screen.getByRole("button", { name: "Launch plan conversation" })).toBeTruthy();
+  });
+
+  it("renders 64px rows with a harness badge, timestamp, and no preview metadata", () => {
+    render(<HermesConversationIndex api={api()} />);
+
+    const launch = screen.getByRole("button", { name: "Launch plan conversation" });
+    const row = launch.closest("[data-conversation-row]");
+    expect(row).not.toBeNull();
+    expect(row?.className).toContain("h-16");
+    expect(launch.textContent).toContain("Launch plan");
+    expect(launch.textContent).toContain("Hermes");
+    expect(launch.textContent).not.toContain("Prepare the release checklist");
+    expect(launch.textContent).not.toContain("4 messages");
+    expect(row?.querySelector("time")).not.toBeNull();
   });
 
   it("distinguishes no matches from an empty canonical index", () => {
@@ -165,6 +181,33 @@ describe("HermesConversationIndex", () => {
     expect(dialog.className).toContain("dialog-fade-in");
     expect([...dialog.classList]).not.toContain("fade-in");
     expect(dialog.style.transform).toBe("translate(-50%, -50%)");
+  });
+
+  it("records the canonical Gateway conversation in global Recents only after opening succeeds", async () => {
+    const openConversation = vi.fn(async () => true);
+    useHermesChat.setState({ openConversation });
+    render(<HermesConversationIndex api={api()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Launch plan conversation" }));
+
+    await waitFor(() => expect(openConversation).toHaveBeenCalledWith(
+      expect.anything(),
+      "launch-plan",
+    ));
+    await waitFor(() => expect(useTabs.getState().recentViews[0]).toMatchObject({
+      kind: "conversation",
+      id: "launch-plan",
+      label: "Launch plan",
+    }));
+
+    openConversation.mockResolvedValue(false);
+    fireEvent.click(screen.getByRole("button", { name: "Customer notes conversation" }));
+    await waitFor(() => expect(openConversation).toHaveBeenCalledWith(
+      expect.anything(),
+      "support-notes",
+    ));
+    expect(useTabs.getState().recentViews.some((recent) => recent.id === "support-notes"))
+      .toBe(false);
   });
 
   it("cancels without a request and confirms only once while pending", async () => {
