@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -11,6 +11,7 @@ const validatePath = 'distro/customer-vps/host-bin/matrix-golden-snapshot-valida
 const activatePath = 'distro/customer-vps/host-bin/matrix-golden-snapshot-activate';
 const fastPathPath = 'distro/customer-vps/host-bin/matrix-golden-snapshot-fast-path';
 const awsCliSmokePath = 'distro/customer-vps/host-bin/matrix-aws-cli-smoke';
+const prerequisitesPath = 'distro/customer-vps/host-bin/matrix-prepare-host-prerequisites';
 
 describe('golden snapshot host scripts', () => {
   it('allows the fast path only for a baked exact-bundle snapshot', async () => {
@@ -18,6 +19,7 @@ describe('golden snapshot host scripts', () => {
     const appDir = join(root, 'opt/matrix/app');
     await mkdir(appDir, { recursive: true });
     await writeFile(join(root, 'opt/matrix/golden-snapshot-system-ready'), 'matrix-host-prerequisites-v1\n');
+    await writeFile(join(root, 'opt/matrix/HOST_PREREQUISITES_READY'), 'version=1\n');
     await writeFile(join(appDir, 'BUNDLE_VERSION'), 'v2026.08.19-test\n');
     await writeFile(join(appDir, 'BUNDLE_SHA256'), `${'a'.repeat(64)}\n`);
     await chmod(fastPathPath, 0o755);
@@ -46,6 +48,7 @@ describe('golden snapshot host scripts', () => {
     await mkdir(appDir, { recursive: true });
     await writeFile(join(appDir, 'BUNDLE_VERSION'), 'v1\n');
     await writeFile(join(appDir, 'BUNDLE_SHA256'), `${'c'.repeat(64)}\n`);
+    await writeFile(join(root, 'opt/matrix/HOST_PREREQUISITES_READY'), 'version=1\n');
     await chmod(fastPathPath, 0o755);
     const env = {
       ...process.env,
@@ -60,6 +63,14 @@ describe('golden snapshot host scripts', () => {
     const externalMarker = join(root, 'external-marker');
     await writeFile(externalMarker, 'matrix-host-prerequisites-v1\n');
     await symlink(externalMarker, join(root, 'opt/matrix/golden-snapshot-system-ready'));
+    await expect(execFileAsync(fastPathPath, [], { env })).rejects.toMatchObject({ code: 1 });
+
+    await unlink(join(root, 'opt/matrix/golden-snapshot-system-ready'));
+    await writeFile(join(root, 'opt/matrix/golden-snapshot-system-ready'), 'matrix-host-prerequisites-v1\n');
+    await unlink(join(root, 'opt/matrix/HOST_PREREQUISITES_READY'));
+    const externalPrerequisites = join(root, 'external-prerequisites');
+    await writeFile(externalPrerequisites, 'version=1\n');
+    await symlink(externalPrerequisites, join(root, 'opt/matrix/HOST_PREREQUISITES_READY'));
     await expect(execFileAsync(fastPathPath, [], { env })).rejects.toMatchObject({ code: 1 });
   });
 
@@ -278,7 +289,13 @@ describe('golden snapshot host scripts', () => {
   });
 
   it('bakes all clean-boot prerequisites before certifying a fast snapshot', async () => {
-    const source = await readFile('distro/customer-vps/golden-snapshot-builder-cloud-init.yaml', 'utf8');
+    const [source, activationSource, prerequisites, service] = await Promise.all([
+      readFile('distro/customer-vps/golden-snapshot-builder-cloud-init.yaml', 'utf8'),
+      readFile(activatePath, 'utf8'),
+      readFile(prerequisitesPath, 'utf8'),
+      readFile('packages/platform/src/golden-snapshot-service.ts', 'utf8'),
+    ]);
+    const prepare = source.indexOf('/opt/matrix/bin/matrix-prepare-host-prerequisites');
     const activation = source.indexOf('/opt/matrix/bin/matrix-golden-snapshot-activate builder');
     const normalizeOwnership = source.indexOf('chown -R root:matrix /opt/matrix/bin /opt/matrix/app /opt/matrix/runtime');
     const normalizeWrites = source.indexOf('chmod -R g+rwX /opt/matrix/app');
@@ -291,7 +308,17 @@ describe('golden snapshot host scripts', () => {
     ]) {
       expect(source).toMatch(new RegExp(`^  - ${packageName}$`, 'm'));
     }
-    expect(source).toContain('https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip');
+    expect(prepare).toBeGreaterThan(-1);
+    expect(prepare).toBeLessThan(activation);
+    expect(prerequisites).toContain('HOST_PREREQUISITES_VERSION=1');
+    expect(prerequisites).toContain('/opt/matrix/HOST_PREREQUISITES_READY');
+    expect(prerequisites).toContain('timeout --kill-after=30 600 env DEBIAN_FRONTEND=noninteractive');
+    expect(prerequisites).toContain('timeout --kill-after=30 120 add-apt-repository -y universe');
+    expect(prerequisites).toContain('https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip');
+    expect(prerequisites).toContain('--connect-timeout 10 --max-time 120');
+    expect(activationSource).toContain('/opt/matrix/HOST_PREREQUISITES_READY');
+    expect(activationSource).toContain('matrix host prerequisites are not ready');
+    expect(service).toContain("'host_prerequisites'");
     expect(source).toContain('command -v "$required_command" >/dev/null');
     expect(normalizeOwnership).toBeGreaterThan(activation);
     expect(normalizeWrites).toBeGreaterThan(normalizeOwnership);
@@ -299,6 +326,7 @@ describe('golden snapshot host scripts', () => {
     expect(readiness).toBeGreaterThan(activation);
     const buildScript = await readFile('scripts/build-host-bundle.sh', 'utf8');
     expect(buildScript).toContain('matrix-golden-snapshot-fast-path');
+    expect(buildScript).toContain('$STAGE_DIR/bin/matrix-prepare-host-prerequisites');
   });
 
   it('functionally certifies the baked AWS CLI before snapshot readiness and validation', async () => {

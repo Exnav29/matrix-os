@@ -17,12 +17,14 @@ path() {
 [[ "${MATRIX_TARGET_BUNDLE_SHA256:-}" =~ ^[a-f0-9]{64}$ ]] || exit 1
 
 readiness_file="$(path /opt/matrix/golden-snapshot-system-ready)"
+host_prerequisites_file="$(path /opt/matrix/HOST_PREREQUISITES_READY)"
 version_file="$(path /opt/matrix/app/BUNDLE_VERSION)"
 sha256_file="$(path /opt/matrix/app/BUNDLE_SHA256)"
-for evidence_file in "$readiness_file" "$version_file" "$sha256_file"; do
+for evidence_file in "$readiness_file" "$host_prerequisites_file" "$version_file" "$sha256_file"; do
   [ -f "$evidence_file" ] && [ ! -L "$evidence_file" ] || exit 1
 done
 
 [ "$(tr -d '\r\n' < "$readiness_file")" = matrix-host-prerequisites-v1 ] || exit 1
+[ "$(tr -d '\r\n' < "$host_prerequisites_file")" = version=1 ] || exit 1
 [ "$(tr -d '\r\n' < "$version_file")" = "$MATRIX_IMAGE_VERSION" ] || exit 1
 [ "$(tr -d '\r\n' < "$sha256_file")" = "$MATRIX_TARGET_BUNDLE_SHA256" ] || exit 1

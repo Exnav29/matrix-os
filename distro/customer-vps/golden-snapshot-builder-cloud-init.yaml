@@ -73,9 +73,6 @@ runcmd:
       exit "$failureStatus"
     }
     trap reportFailure EXIT
-    curl --fail --location --retry 3 --retry-delay 5 --retry-all-errors --connect-timeout 10 --max-time 120 https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
-    unzip -q /tmp/awscliv2.zip -d /tmp
-    /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli
     install -d -m 0755 /opt/matrix
     curl --fail --location --retry 3 --retry-all-errors --connect-timeout 10 --max-time 900 '{{bundleUrl}}' -o /tmp/matrix-host.tgz
     failureStage='bundle_verify'
@@ -85,7 +82,9 @@ runcmd:
     printf '%s\n' '{{bundleVersion}}' >/opt/matrix/app/BUNDLE_VERSION
     printf '%s\n' '{{bundleSha256}}' >/opt/matrix/app/BUNDLE_SHA256
     test "$(tr -d '\r\n' < /opt/matrix/app/BUNDLE_VERSION)" = '{{bundleVersion}}'
-    chmod 0755 /opt/matrix/bin/matrix-aws-cli-smoke /opt/matrix/bin/matrix-golden-snapshot-activate /opt/matrix/bin/matrix-golden-snapshot-fast-path /opt/matrix/bin/matrix-golden-snapshot-sanitize /opt/matrix/bin/matrix-golden-snapshot-validate
+    chmod 0755 /opt/matrix/bin/matrix-prepare-host-prerequisites /opt/matrix/bin/matrix-aws-cli-smoke /opt/matrix/bin/matrix-golden-snapshot-activate /opt/matrix/bin/matrix-golden-snapshot-fast-path /opt/matrix/bin/matrix-golden-snapshot-sanitize /opt/matrix/bin/matrix-golden-snapshot-validate
+    failureStage='host_prerequisites'
+    timeout --kill-after=30 1800 /opt/matrix/bin/matrix-prepare-host-prerequisites
     failureStage='activation'
     timeout --kill-after=30 1200 /opt/matrix/bin/matrix-golden-snapshot-activate builder
     chown -R root:matrix /opt/matrix/bin /opt/matrix/app /opt/matrix/runtime
