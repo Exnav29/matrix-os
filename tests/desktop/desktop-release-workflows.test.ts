@@ -28,6 +28,9 @@ describe("desktop release workflows", () => {
     expect(workflow).toContain("Smoke test macOS DMG mount");
     expect(workflow).toContain("desktop-update-fixture-server.mjs");
     expect(workflow).toContain('OPERATOR_UPDATE_FEED="http://127.0.0.1:${update_port}/"');
+    expect(workflow).toMatch(
+      /launch_attempts=20\n\s+if \[ "\$\{\{ matrix\.arch \}\}" = "x64" \]; then\n\s+# GitHub's macOS runner is arm64, so the x64 app starts through Rosetta\.\n\s+launch_attempts=60\n\s+fi\n\s+for \(\(attempt = 1; attempt <= launch_attempts; attempt \+= 1\)\); do/,
+    );
     expect(workflow).toContain('grep -Fq "[updates] update check completed: up to date" "$app_log"');
     expect(workflow).toContain('grep -Fq "[updates] check failed:" "$app_log"');
     expect(workflow).toContain('hdiutil attach "$dmg_path" -mountpoint "$mount_dir" -nobrowse -readonly');
