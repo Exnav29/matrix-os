@@ -5,6 +5,7 @@ import {
   getUserMachine,
   insertUserMachine,
   parseNullableProviderActionId,
+  promoteHostBundleChannel,
   updateUserMachine,
   upsertHostBundleRelease,
   type PlatformDB,
@@ -108,7 +109,8 @@ describe('golden snapshot provisioning activation', () => {
     return enqueued.snapshot.snapshotId;
   }
 
-  it('provisions and registers an operator preview from one exact test snapshot while rollout stays disabled', async () => {
+  it('pins an exact test snapshot bundle when stable points to an older release', async () => {
+    await promoteHostBundleChannel(db, 'stable', 'v1', '2026-07-03T00:00:00.000Z');
     const snapshotId = await readySnapshot('v2', 302, true);
     const createServer = vi.fn().mockResolvedValue({
       id: 903,
@@ -121,8 +123,8 @@ describe('golden snapshot provisioning activation', () => {
       db,
       config: loadCustomerVpsConfig({
         PLATFORM_SECRET: 'platform-secret',
-        CUSTOMER_VPS_IMAGE_VERSION: 'v2',
-        MATRIX_HOST_BUNDLE_URL: 'https://bundles.example/system-bundles/v2/matrix-host-bundle.tar.gz',
+        CUSTOMER_VPS_IMAGE_VERSION: 'stable',
+        MATRIX_HOST_BUNDLE_URL: 'https://bundles.example/system-bundles/stable/matrix-host-bundle.tar.gz',
         S3_ACCESS_KEY_ID: 'access-key',
         S3_SECRET_ACCESS_KEY: 'secret-key',
         S3_ENDPOINT: 'https://r2.example',
@@ -159,6 +161,12 @@ describe('golden snapshot provisioning activation', () => {
         snapshot_id: snapshotId,
       }),
     }));
+    const createInput = createServer.mock.calls[0]?.[0];
+    expect(createInput?.userData).toContain(
+      'MATRIX_HOST_BUNDLE_URL=https://bundles.example/system-bundles/v2/matrix-host-bundle.tar.gz',
+    );
+    expect(createInput?.userData).toContain('MATRIX_IMAGE_VERSION=v2');
+    expect(createInput?.userData).toContain('MATRIX_UPDATE_CHANNEL=stable');
     await expect(db.executor.selectFrom('golden_snapshot_rollout_controls')
       .selectAll().execute()).resolves.toEqual([]);
     await expect(getProvisioningJob(db, '50000000-0000-4000-8000-000000000009'))
@@ -193,6 +201,39 @@ describe('golden snapshot provisioning activation', () => {
         sourceSnapshotId: snapshotId,
         sourceBaseGeneration: compatibility.baseGeneration,
       });
+  });
+
+  it.each([
+    ['nonstandard path', 'https://bundles.example/custom/latest.tar.gz'],
+    ['query-only version segment', 'https://bundles.example/custom/latest.tar.gz?source=/system-bundles/stable/'],
+    ['fragment-only version segment', 'https://bundles.example/custom/latest.tar.gz#/system-bundles/stable/'],
+  ])('rejects an exact test snapshot for a custom bundle URL with a %s', async (_case, hostBundleUrl) => {
+    await promoteHostBundleChannel(db, 'stable', 'v1', '2026-07-03T00:00:00.000Z');
+    const snapshotId = await readySnapshot('v2', 302, true);
+    const createServer = vi.fn();
+    const service = createCustomerVpsService({
+      db,
+      config: loadCustomerVpsConfig({
+        PLATFORM_SECRET: 'platform-secret',
+        CUSTOMER_VPS_IMAGE_VERSION: 'stable',
+        MATRIX_HOST_BUNDLE_URL: hostBundleUrl,
+        S3_ACCESS_KEY_ID: 'access-key',
+        S3_SECRET_ACCESS_KEY: 'secret-key',
+        S3_ENDPOINT: 'https://r2.example',
+        HETZNER_SERVER_TYPE: 'cpx22',
+      }),
+      hetzner: createMockHetznerClient({ createServer }),
+      systemStore: createMockCustomerVpsSystemStore(),
+      now: () => new Date('2026-07-03T00:01:00.000Z'),
+    });
+
+    await expect(service.provisionPreview({
+      clerkUserId: 'user_preview_custom_bundle',
+      handle: 'pr-12741',
+      runtimeSlot: 'pr-12741',
+      testSnapshotId: snapshotId,
+    })).rejects.toMatchObject({ code: 'snapshot_clone_rejected' });
+    expect(createServer).not.toHaveBeenCalled();
   });
 
   it('rejects a non-test snapshot on the operator preview override before provider creation', async () => {

@@ -105,6 +105,7 @@ import {
   bindTestSnapshotToPreviewProvisionInTransaction,
   createPreviewTestSnapshotCreateIntent,
   isPreviewTestSnapshotDecision,
+  resolvePreviewTestSnapshotBundle,
   resolvePersistedProvisioningImage,
 } from './golden-snapshot-preview-test.js';
 
@@ -372,12 +373,21 @@ interface HostBundleRef {
   sha256?: string | null;
 }
 
-function hostBundleUrlForImageVersion(config: CustomerVpsConfig, imageVersion: string): string {
+function tryPinHostBundleUrlForImageVersion(
+  config: CustomerVpsConfig,
+  imageVersion: string,
+): string | undefined {
   const currentSegment = `/system-bundles/${encodeURIComponent(config.imageVersion)}/`;
+  const url = new URL(config.hostBundleUrl);
+  if (!url.pathname.includes(currentSegment)) return undefined;
   const pinnedSegment = `/system-bundles/${encodeURIComponent(imageVersion)}/`;
-  if (config.hostBundleUrl.includes(currentSegment)) {
-    return config.hostBundleUrl.replaceAll(currentSegment, pinnedSegment);
-  }
+  url.pathname = url.pathname.replaceAll(currentSegment, pinnedSegment);
+  return url.toString();
+}
+
+function hostBundleUrlForImageVersion(config: CustomerVpsConfig, imageVersion: string): string {
+  const pinnedUrl = tryPinHostBundleUrlForImageVersion(config, imageVersion);
+  if (pinnedUrl) return pinnedUrl;
   // Defensive fallback for future URL-template changes. The current generated
   // URL always contains the encoded image-version segment above.
   const url = new URL(config.hostBundleUrl);
@@ -385,7 +395,26 @@ function hostBundleUrlForImageVersion(config: CustomerVpsConfig, imageVersion: s
   return url.toString();
 }
 
-async function resolveHostBundleRef(db: PlatformDB, config: CustomerVpsConfig): Promise<HostBundleRef> {
+async function resolveHostBundleRef(
+  db: PlatformDB,
+  config: CustomerVpsConfig,
+  previewTestSnapshotId?: string,
+): Promise<HostBundleRef> {
+  if (previewTestSnapshotId) {
+    const snapshotBundle = await resolvePreviewTestSnapshotBundle(db, previewTestSnapshotId);
+    if (!snapshotBundle) {
+      throw new CustomerVpsError(409, 'snapshot_clone_rejected', 'Provisioning image unavailable');
+    }
+    const pinnedUrl = tryPinHostBundleUrlForImageVersion(config, snapshotBundle.bundleVersion);
+    if (!pinnedUrl) {
+      throw new CustomerVpsError(409, 'snapshot_clone_rejected', 'Provisioning image unavailable');
+    }
+    return {
+      imageVersion: snapshotBundle.bundleVersion,
+      hostBundleUrl: pinnedUrl,
+      sha256: snapshotBundle.bundleSha256,
+    };
+  }
   if (config.hostBundleUrlOverride || !HOST_BUNDLE_CHANNELS.has(config.imageVersion)) {
     const release = await getHostBundleRelease(db, config.imageVersion);
     return {
@@ -1701,7 +1730,7 @@ export function createCustomerVpsService(deps: CustomerVpsServiceDeps): Customer
       return activeProvisionResponse(reconciled, deps.config.provisionEtaSeconds);
     }
 
-    const bundleRef = await resolveHostBundleRef(deps.db, deps.config);
+    const bundleRef = await resolveHostBundleRef(deps.db, deps.config, testSnapshotId);
 
     let provisionRow: { existing: UserMachineRecord | null };
     try {
