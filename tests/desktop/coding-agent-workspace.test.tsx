@@ -1675,7 +1675,9 @@ describe("ProjectChatsView", () => {
     expect(screen.getAllByText("Approve deployment").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Repair failed run").length).toBeGreaterThan(0);
     expect(screen.getByText("Approval needed")).toBeTruthy();
-    expect(screen.getAllByText("Failed").length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: "Open details for Repair failed run, Failed" }).textContent,
+    ).toContain("Failed");
     expect(screen.getByText("No active threads.")).toBeTruthy();
   });
 

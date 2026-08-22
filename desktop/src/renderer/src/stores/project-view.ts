@@ -17,8 +17,31 @@ export type { ProjectView } from "../../../shared/project-views";
 
 export const MAX_PROJECT_VIEW_ENTRIES = 50;
 
-const DEFAULT_VIEW: ProjectView = "overview";
+export const DEFAULT_PROJECT_VIEW: ProjectView = "overview";
 
+// Hydration merges two independently mutable fields. Track which field the
+// operator actually changed while the async state read was pending so an
+// automatic chat selection cannot accidentally masquerade as an explicit
+// switch from a persisted Board view (and vice versa). These records are
+// pruned with the bounded entry cache.
+let fieldMutationRevision = 0;
+const viewMutationRevisions: Record<string, number | undefined> = {};
+const selectionMutationRevisions: Record<string, number | undefined> = {};
+
+function clearFieldMutationRevisions(): void {
+  for (const key of Object.keys(viewMutationRevisions)) delete viewMutationRevisions[key];
+  for (const key of Object.keys(selectionMutationRevisions)) delete selectionMutationRevisions[key];
+}
+
+function pruneFieldMutationRevisions(entries: Record<string, ProjectViewEntry>): void {
+  const retained = new Set(Object.keys(entries));
+  for (const key of Object.keys(viewMutationRevisions)) {
+    if (!retained.has(key)) delete viewMutationRevisions[key];
+  }
+  for (const key of Object.keys(selectionMutationRevisions)) {
+    if (!retained.has(key)) delete selectionMutationRevisions[key];
+  }
+}
 interface ProjectViewState {
   entries: Record<string, ProjectViewEntry>;
   selectionRevisions: Record<string, number>;
@@ -58,7 +81,7 @@ function upsertEntry(
 ): Record<string, ProjectViewEntry> {
   const existing = entries[projectId];
   const next: ProjectViewEntry = {
-    view: patch.view ?? existing?.view ?? DEFAULT_VIEW,
+    view: patch.view ?? existing?.view ?? DEFAULT_PROJECT_VIEW,
     selectedThreadId: patch.selectedThreadId !== undefined
       ? patch.selectedThreadId
       : existing?.selectedThreadId ?? null,
@@ -79,6 +102,7 @@ function upsertEntry(
 }
 
 export function clearProjectViewRuntime(): void {
+  clearFieldMutationRevisions();
   useProjectView.setState({ entries: {}, selectionRevisions: {}, runtimeScope: null });
 }
 
@@ -87,6 +111,8 @@ export function clearProjectView(projectId: string): void {
   if (!(projectId in state.entries)) return;
   const entries = { ...state.entries };
   delete entries[projectId];
+  delete viewMutationRevisions[projectId];
+  delete selectionMutationRevisions[projectId];
   const selectionRevisions = { ...state.selectionRevisions };
   delete selectionRevisions[projectId];
   useProjectView.setState({ entries, selectionRevisions });
@@ -101,6 +127,9 @@ export const useProjectView = create<ProjectViewState>()((set, get) => ({
   hydrate: async (runtimeScope) => {
     const previousScope = get().runtimeScope;
     if (previousScope === runtimeScope) return;
+    const entriesBeforeHydration = previousScope === null ? get().entries : {};
+    if (previousScope !== null) clearFieldMutationRevisions();
+    const hydrationRevision = fieldMutationRevision;
     // Set the scope up front so writes that land while the persisted state is
     // being read still persist afterwards. Entries created before the first
     // hydration are unscoped launch intents and must survive; entries owned by
@@ -108,7 +137,7 @@ export const useProjectView = create<ProjectViewState>()((set, get) => ({
     // one account can never overwrite another account's persisted views.
     set({
       runtimeScope,
-      ...(previousScope === null ? {} : { entries: {} }),
+      ...(previousScope === null ? {} : { entries: {}, selectionRevisions: {} }),
     });
     let persisted: Record<string, ProjectViewEntry> = {};
     try {
@@ -124,9 +153,28 @@ export const useProjectView = create<ProjectViewState>()((set, get) => ({
       );
     }
     if (get().runtimeScope !== runtimeScope) return;
-    // In-memory entries were written after launch (e.g. a notification routed
-    // a chat open before the read settled) — they are newer and always win.
-    const merged = { ...persisted, ...get().entries };
+    // Pre-hydration launch intents still win as complete entries. For entries
+    // first created while the read was pending, merge each field independently:
+    // workspace auto-selection changes only selectedThreadId, while a click on
+    // the Board/Chats switch changes only view.
+    const currentEntries = get().entries;
+    const merged = { ...persisted };
+    for (const [projectId, current] of Object.entries(currentEntries)) {
+      const stored = persisted[projectId];
+      if (!stored || projectId in entriesBeforeHydration) {
+        merged[projectId] = current;
+        continue;
+      }
+      merged[projectId] = {
+        view: (viewMutationRevisions[projectId] ?? 0) > hydrationRevision
+          ? current.view
+          : stored.view,
+        selectedThreadId: (selectionMutationRevisions[projectId] ?? 0) > hydrationRevision
+          ? current.selectedThreadId
+          : stored.selectedThreadId,
+        touchedAt: Math.max(stored.touchedAt, current.touchedAt),
+      };
+    }
     const keys = Object.keys(merged);
     const capped = keys.length <= MAX_PROJECT_VIEW_ENTRIES
       ? merged
@@ -140,25 +188,31 @@ export const useProjectView = create<ProjectViewState>()((set, get) => ({
       entries: capped,
       selectionRevisions: retainSelectionRevisions(get().selectionRevisions, capped),
     });
+    pruneFieldMutationRevisions(capped);
     persistEntries(capped, runtimeScope);
   },
 
-  viewFor: (projectId) => get().entries[projectId]?.view ?? DEFAULT_VIEW,
+  viewFor: (projectId) => get().entries[projectId]?.view ?? DEFAULT_PROJECT_VIEW,
 
   selectedThreadFor: (projectId) => get().entries[projectId]?.selectedThreadId ?? null,
 
   selectionRevisionFor: (projectId) => get().selectionRevisions[projectId] ?? 0,
 
   setView: (projectId, view) => {
+    fieldMutationRevision += 1;
+    viewMutationRevisions[projectId] = fieldMutationRevision;
     const entries = upsertEntry(get().entries, projectId, { view }, Date.now());
     set({
       entries,
       selectionRevisions: retainSelectionRevisions(get().selectionRevisions, entries),
     });
+    pruneFieldMutationRevisions(entries);
     persistEntries(entries, get().runtimeScope);
   },
 
   setSelectedThread: (projectId, threadId) => {
+    fieldMutationRevision += 1;
+    selectionMutationRevisions[projectId] = fieldMutationRevision;
     const entries = upsertEntry(
       get().entries,
       projectId,
@@ -173,6 +227,7 @@ export const useProjectView = create<ProjectViewState>()((set, get) => ({
       entries,
     );
     set({ entries, selectionRevisions });
+    pruneFieldMutationRevisions(entries);
     persistEntries(entries, get().runtimeScope);
   },
 }));

@@ -166,6 +166,25 @@ suite("operator desktop e2e", () => {
     await page.getByRole("button", { name: "Open session Investigate auth callback" }).waitFor({ timeout: 10_000 });
     await page.getByRole("button", { name: "Open session Investigate auth callback" }).click();
     await page.getByRole("region", { name: "Conversation Investigate auth callback" }).waitFor();
+    await page.getByRole("navigation", { name: "Project conversations" }).waitFor();
+    await page.getByRole("group", { name: "Project chats" }).waitFor();
+    await page.getByRole("group", { name: "Task Fix the failing auth tests" }).waitFor();
+    await page.getByRole("button", { name: "Chat Verify token refresh" }).waitFor();
+
+    const railSearch = page.getByRole("searchbox", { name: "Search chats" });
+    await railSearch.fill("token");
+    await page.getByRole("button", { name: "Chat Verify token refresh" }).waitFor();
+    await expect.poll(
+      () => page.getByRole("button", { name: "Chat Investigate auth callback" }).count(),
+    ).toBe(0);
+    await railSearch.fill("");
+    const statusFilter = page.getByRole("combobox", { name: "Filter chats by status" });
+    await statusFilter.selectOption("done");
+    await page.getByRole("button", { name: "Chat Verify token refresh" }).waitFor();
+    await expect.poll(
+      () => page.getByRole("button", { name: "Chat Investigate auth callback" }).count(),
+    ).toBe(0);
+    await statusFilter.selectOption("all");
     await page.screenshot({ path: join(SCREENSHOT_DIR, "04-project-session.png") });
 
     // The segmented control switches back to the project's board.
@@ -206,8 +225,8 @@ suite("operator desktop e2e", () => {
 
   it("validates MAT-348 tool hierarchy and composer in built Electron", async () => {
     await ensureSignedIn(page);
-    await page.locator("aside button", { hasText: "Matrix OS" }).first().click();
-    await page.getByRole("button", { name: "Chats" }).click();
+    await openMatrixProjectOverview(page);
+    await page.getByRole("button", { name: "Open session Investigate auth callback" }).click();
     await page.getByRole("button", { name: "New chat in Matrix OS" }).click();
 
     const prompt = "MAT-348: validate a long tool-heavy agent turn";
@@ -280,7 +299,7 @@ suite("operator desktop e2e", () => {
     await page.getByRole("button", { name: "Integrations" }).click();
     await page.getByRole("heading", { name: "Integrations" }).waitFor({ timeout: 10_000 });
     await page.getByText("Matrix OS Team").waitFor({ timeout: 10_000 });
-    await page.getByText("GitHub").waitFor();
+    await page.getByText("GitHub", { exact: true }).waitFor();
     await page.getByText("Slack").waitFor();
     await page.mouse.move(1_000, 680);
     await page.waitForTimeout(150);
