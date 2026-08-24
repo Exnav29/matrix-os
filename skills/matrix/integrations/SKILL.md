@@ -38,28 +38,34 @@ Use this when the user wants Gmail, Calendar, Drive, GitHub, Slack, Discord, or 
 4. Call the service action through Matrix.
 5. Store resulting app data in Matrix/Postgres if needed.
 
-## Gateway API
+## Agent tools
 
-Default base URL inside a Matrix user instance:
+Prefer the native Matrix integrations MCP tools. They are registered for every
+supported agent and provide structured `list_integration_inventory`,
+`list_connected_services`, `describe_service`, `connect_service`,
+`sync_services`, `call_service`, and `disconnect_service` operations.
 
-```text
-http://localhost:4000
-```
+At the start of a relevant task, call `list_integration_inventory` so the user
+does not need to mention this skill or repeat which accounts are connected.
+Use `describe_service` before an unfamiliar action, then use `call_service`.
 
-Use the configured `skills.config.matrix.gateway_url` if Agent injects one.
+### Terminal fallback
+
+Only use the bundled `matrix-integrations` command when MCP tools are unavailable.
+It supplies Matrix's local identity to the gateway without exposing that
+credential or any provider credential to the agent process.
 
 ### List Connected Services
 
 ```bash
-curl -fsS "$MATRIX_GATEWAY_URL/api/integrations"
+matrix-integrations inventory
+matrix-integrations list
 ```
 
 ### Start OAuth
 
 ```bash
-curl -fsS "$MATRIX_GATEWAY_URL/api/integrations/connect" \
-  -H 'Content-Type: application/json' \
-  -d '{"service":"github","label":"Work GitHub"}'
+matrix-integrations connect github "Work GitHub"
 ```
 
 Return the connect URL to the user. Do not immediately claim success.
@@ -67,19 +73,18 @@ Return the connect URL to the user. Do not immediately claim success.
 ### Sync After OAuth
 
 ```bash
-curl -fsS "$MATRIX_GATEWAY_URL/api/integrations/sync" \
-  -X POST \
-  -H 'Content-Type: application/json' \
-  -d '{}'
+matrix-integrations sync
 ```
 
 ### Call an Action
 
 ```bash
-curl -fsS "$MATRIX_GATEWAY_URL/api/integrations/call" \
-  -H 'Content-Type: application/json' \
-  -d '{"service":"github","action":"list_repos","params":{"sort":"updated","per_page":10}}'
+matrix-integrations describe github
+matrix-integrations call github list_repos '{"sort":"updated","per_page":10}'
 ```
+
+If multiple accounts for the same service are connected, pass the account
+label as the final `call` argument.
 
 ## In-App Bridge
 
@@ -118,7 +123,7 @@ async function callService(service: string, action: string, params: unknown) {
 
 ## Verification
 
-- `GET /api/integrations` returns services or an empty list, not a 404.
+- `matrix-integrations inventory` returns services or an empty list.
 - OAuth connect returns a URL.
 - Sync works after the user authorizes.
 - App code uses `window.MatrixOS.integrations()` / `window.MatrixOS.service()`, not raw provider secrets or direct `/api/bridge/*` fetches.
