@@ -4,17 +4,19 @@ import React from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatTab from "../../desktop/src/renderer/src/features/chat/ChatTab";
+import { createLegacyGlobalProviderCatalog } from "../../desktop/src/renderer/src/features/chat/canonical-composer-adapter";
+import { useProviderPreferences } from "../../desktop/src/renderer/src/features/settings/provider-preferences";
 import {
   conversationMessageDisplay,
   sharedConversationResources,
 } from "../../desktop/src/renderer/src/features/chat/ChatResourcesPanel";
-import { useIntegrations } from "../../desktop/src/renderer/src/features/integrations/integrations-store";
 import { useBoard } from "../../desktop/src/renderer/src/stores/board";
 import { useConnection } from "../../desktop/src/renderer/src/stores/connection";
+import { useCodingAgentWorkspace } from "../../desktop/src/renderer/src/stores/coding-agent-workspace";
 import { useHermesChat } from "../../desktop/src/renderer/src/stores/hermes-chat";
 import { useTabs } from "../../desktop/src/renderer/src/stores/tabs";
 import { useThreads, type AgentThread } from "../../desktop/src/renderer/src/stores/threads";
-import { useUi } from "../../desktop/src/renderer/src/stores/ui";
+import { appendSharedComposerText, setSharedComposerText } from "./shared-chat-composer-test-utils";
 
 function thread(id: string, title: string): AgentThread {
   return {
@@ -60,13 +62,16 @@ describe("ChatTab", () => {
       abort: vi.fn(),
     });
     useThreads.setState({ threads: [], activeThreadId: null });
+    useCodingAgentWorkspace.setState(useCodingAgentWorkspace.getInitialState(), true);
+    useCodingAgentWorkspace.setState({
+      summary: { providers: [] } as never,
+      status: "ready",
+    });
     useTabs.setState(useTabs.getInitialState(), true);
-    useUi.setState({ requestedSettingsSection: null });
-    useIntegrations.setState({
-      available: [],
-      connections: [],
-      status: "idle",
-      errorMessage: null,
+    useProviderPreferences.setState({
+      defaultProviderId: null,
+      composerSelections: {},
+      hydrated: true,
     });
     useConnection.setState({
       status: "signed-in",
@@ -80,6 +85,7 @@ describe("ChatTab", () => {
       configurable: true,
       value: {
         invoke: vi.fn(async (channel: string) => {
+          if (channel === "state:get") return { value: null };
           if (channel === "state:set") return { ok: true };
           throw new Error(`unexpected channel ${channel}`);
         }),
@@ -366,17 +372,36 @@ describe("ChatTab", () => {
     useHermesChat.setState({ messages: [], status: "idle", send: vi.fn(), abort: vi.fn() });
     render(<ChatTab />);
 
-    expect(screen.getByRole("heading", { name: "How can I help you?" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "What should we build today?" })).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "How can I help you today?" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Attach files" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Resources" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Use Codex for a project chat" })).toBeTruthy();
-    expect(screen.getByRole("combobox", { name: "Chat harness" })).toHaveProperty("value", "hermes");
-    expect(screen.getByTestId("chat-empty-logo").style.height).toBe("208px");
+    expect(screen.getByRole("button", { name: "Add files and more" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Choose project for chat" }).closest(".prompt-card"))
+      .not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Resources" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use Codex for a project chat" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add to project" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Explore and understand code" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Build a new feature, app, or tool" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Review code and suggest changes" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Fix issues and failures" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Choose model and provider" }).getAttribute("data-provider-instance"))
+      .toBe("hermes_default");
+    expect(screen.queryByTestId("chat-empty-logo")).toBeNull();
     expect(screen.getByTestId("chat-empty-content").className).toContain("justify-center");
     expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
     expect(screen.queryByText("Connect messaging")).toBeNull();
     expect(screen.queryByRole("button", { name: /voice|microphone/i })).toBeNull();
+  });
+
+  it("seeds the shared composer from a Figma starter card", async () => {
+    useHermesChat.setState({ messages: [], status: "idle", send: vi.fn(), abort: vi.fn() });
+    render(<ChatTab />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Review code and suggest changes" }));
+
+    await waitFor(() => expect(
+      screen.getByRole("textbox", { name: "How can I help you today?" }).textContent,
+    ).toBe("Review code and suggest changes"));
   });
 
   it("removes the redundant internal Chat rail and leaves agent-run navigation to global Recents", () => {
@@ -402,38 +427,6 @@ describe("ChatTab", () => {
     fireEvent.change(picker, { target: { files: [file] } });
 
     expect(await screen.findByRole("button", { name: "Remove notes.md" })).toBeTruthy();
-  });
-
-  it("shows canonical shared files and Gateway-backed connected tools in Resources", () => {
-    useHermesChat.setState({
-      messages: [{
-        id: "m1",
-        role: "user",
-        content: "Review this\n\nAttached files (available on your Matrix computer):\n- ~/temporary/desktop-chat/abc-screen.png (/home/matrix/home/temporary/desktop-chat/abc-screen.png)",
-        timestamp: 1,
-      }],
-    });
-    useIntegrations.setState({
-      status: "ready",
-      connections: [{
-        id: "00000000-0000-4000-8000-000000000001",
-        service: "google_drive",
-        accountLabel: "Design Drive",
-        accountEmail: null,
-        status: "active",
-        connectedAt: "2026-08-16T00:00:00.000Z",
-      }],
-    });
-
-    render(<ChatTab />);
-    fireEvent.click(screen.getByRole("button", { name: "Resources" }));
-
-    const panel = screen.getByRole("complementary", { name: "Resources" });
-    expect(panel.textContent).toContain("Shared with agent");
-    expect(panel.textContent).toContain("screen.png");
-    expect(panel.textContent).not.toContain("/home/matrix");
-    expect(panel.textContent).toContain("Design Drive");
-    expect(panel.textContent).toContain("Agent-created resources are not available from this Gateway yet.");
   });
 
   it("reduces canonical resource paths to bounded basenames", () => {
@@ -462,9 +455,6 @@ describe("ChatTab", () => {
     expect(document.body.textContent).not.toContain("temporary/desktop-chat");
     expect(document.body.textContent).not.toContain("/home/matrix");
 
-    fireEvent.click(screen.getByRole("button", { name: "Resources" }));
-    expect(screen.getByRole("complementary", { name: "Resources" }).textContent)
-      .toContain("final report.pdf");
   });
 
   it("reports malformed attachment-name encoding before using a safe fallback", () => {
@@ -479,32 +469,6 @@ describe("ChatTab", () => {
       "[chat-resources] attachment name decode failed:",
       "URIError",
     );
-  });
-
-  it("states unavailable and failed connected-tool Gateway capabilities explicitly", () => {
-    useIntegrations.setState({ status: "unavailable", connections: [] });
-    const { rerender } = render(<ChatTab />);
-    fireEvent.click(screen.getByRole("button", { name: "Resources" }));
-    expect(screen.getByText("Connected tools are not available from this Gateway.")).toBeTruthy();
-
-    act(() => useIntegrations.setState({ status: "error", connections: [] }));
-    rerender(<ChatTab />);
-    expect(screen.getByText("Connected tools could not be loaded. Try again from Integrations.")).toBeTruthy();
-  });
-
-  it("toggles Resources, closes it with Escape, and routes Connect tool to Integrations", () => {
-    render(<ChatTab />);
-    const trigger = screen.getByRole("button", { name: "Resources" });
-
-    fireEvent.click(trigger);
-    expect(trigger.getAttribute("aria-expanded")).toBe("true");
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByRole("complementary", { name: "Resources" })).toBeNull();
-
-    fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole("button", { name: "Connect tool" }));
-    expect(useUi.getState().requestedSettingsSection).toBe("integrations");
-    expect(useTabs.getState().tabs.some((tab) => tab.kind === "settings")).toBe(true);
   });
 
   it("previews pasted files horizontally, uploads on Send, and sends Hermes readable paths", async () => {
@@ -526,7 +490,7 @@ describe("ChatTab", () => {
     const previewRow = screen.getByRole("group", { name: "Attachments" });
     expect(previewRow.className).toContain("overflow-x-auto");
     const input = screen.getByLabelText("How can I help you today?");
-    fireEvent.change(input, { target: { value: "Review this screenshot" } });
+    await setSharedComposerText(input, "Review this screenshot");
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => expect(putBytes).toHaveBeenCalledTimes(1));
@@ -547,9 +511,10 @@ describe("ChatTab", () => {
     });
     render(<ChatTab />);
 
-    fireEvent.change(screen.getByRole("textbox", { name: "How can I help you today?" }), {
-      target: { value: "Continue the release check" },
-    });
+    await setSharedComposerText(
+      screen.getByRole("textbox", { name: "How can I help you today?" }),
+      "Continue the release check",
+    );
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => expect(send).toHaveBeenCalledWith("Continue the release check"));
@@ -561,18 +526,183 @@ describe("ChatTab", () => {
     });
   });
 
-  it("routes the Codex harness to a project-bound durable chat", async () => {
+  it("sends Global Chat skill and project tokens as agent-readable prompt context", async () => {
+    const send = vi.fn();
+    const catalog = createLegacyGlobalProviderCatalog({ hasProject: true });
+    const availableCatalog = {
+      ...catalog,
+      instances: catalog.instances.map((instance) => ({
+        ...instance,
+        availability: "available" as const,
+        models: instance.models.map((model) => ({ ...model, availability: "available" as const })),
+        skills: instance.id === "hermes_default"
+          ? [{ id: "review", displayName: "Review", description: "Review the selected context", invocation: "/review" }]
+          : instance.skills,
+        defaultSelection: { instanceId: instance.id, model: instance.models[0]!.id, options: [] },
+      })),
+    };
+    useConnection.setState({
+      api: {
+        get: vi.fn(async (path: string) => {
+          if (path === "/api/chat-providers") return availableCatalog;
+          if (path.startsWith("/api/files/list")) return { entries: [] };
+          throw new Error(`unexpected GET ${path}`);
+        }),
+      } as never,
+    });
+    useHermesChat.setState({ messages: [], status: "idle", send, abort: vi.fn() });
+    render(<ChatTab />);
+
+    const input = screen.getByLabelText("How can I help you today?");
+    await setSharedComposerText(input, "/rev");
+    fireEvent.click(await screen.findByRole("option", { name: /Review/ }));
+    await appendSharedComposerText(input, "Inspect @Matrix");
+    fireEvent.click(await screen.findByRole("option", { name: /Matrix OS/ }));
+
+    expect(screen.getByTestId("composer-reference-token-skill-review")).toBeTruthy();
+    expect(await screen.findByTestId("composer-reference-token-project-matrix-os")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(send).toHaveBeenCalledWith(
+      "/review Inspect [Matrix OS](matrix-os)",
+    ));
+  });
+
+  it("keeps non-Hermes harnesses visible but unavailable on the legacy Global route", async () => {
+    const catalog = createLegacyGlobalProviderCatalog({ hasProject: true });
+    const availableCatalog = {
+      ...catalog,
+      instances: catalog.instances.map((instance) => ({
+        ...instance,
+        availability: "available" as const,
+        models: instance.models.map((model) => ({ ...model, availability: "available" as const })),
+        defaultSelection: { instanceId: instance.id, model: instance.models[0]!.id, options: [] },
+      })),
+    };
+    useConnection.setState({
+      api: {
+        get: vi.fn(async (path: string) => {
+          if (path === "/api/chat-providers") return availableCatalog;
+          throw new Error(`unexpected GET ${path}`);
+        }),
+      } as never,
+    });
     useHermesChat.setState({ messages: [], status: "idle" });
     render(<ChatTab />);
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Chat harness" }), {
-      target: { value: "codex" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    const codex = await screen.findByRole("button", { name: "Codex harness, Unavailable" });
+    expect(codex.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("button", { name: "Choose model and provider" }).textContent)
+      .toContain("Current model");
+    expect(useTabs.getState().tabs).not.toContainEqual(expect.objectContaining({ kind: "project" }));
+  });
 
-    await waitFor(() => expect(useTabs.getState().tabs).toContainEqual(expect.objectContaining({
-      kind: "project",
-      projectSlug: "matrix-os",
-    })));
+  it("opens authenticated provider setup from the Global Chat catalog", async () => {
+    const fallback = createLegacyGlobalProviderCatalog({ hasProject: true });
+    const connectAction = {
+      id: "claude_connect",
+      kind: "foreground_terminal" as const,
+      label: "Connect Claude",
+      command: "claude",
+    };
+    const catalog = {
+      ...fallback,
+      drivers: [
+        ...fallback.drivers,
+        { kind: "claude_code" as const, displayName: "Claude Code", adapterVersion: "1.0.0", capabilityClass: "coding_agent" as const },
+      ],
+      instances: [
+        ...fallback.instances,
+        {
+          ...fallback.instances[1]!,
+          id: "claude_code_default",
+          driverKind: "claude_code" as const,
+          displayName: "Claude Code",
+          availability: "auth_required" as const,
+          models: [{
+            ...fallback.instances[1]!.models[0]!,
+            availability: "auth_required" as const,
+          }],
+          setupActions: [connectAction],
+        },
+      ],
+    };
+    const provider = {
+      id: "claude",
+      kind: "claude" as const,
+      displayName: "Claude",
+      availability: "auth_required" as const,
+      installStatus: "installed" as const,
+      authStatus: "missing" as const,
+      supportedModes: ["default"],
+      defaultMode: "default",
+      setupActions: [connectAction],
+    };
+    useCodingAgentWorkspace.setState({
+      summary: { providers: [provider] } as never,
+      status: "ready",
+      refresh: vi.fn(async () => undefined),
+    });
+    const post = vi.fn(async () => ({ name: "matrix-setup-claude" }));
+    useConnection.setState({
+      api: {
+        get: vi.fn(async (path: string) => {
+          if (path === "/api/chat-providers") return catalog;
+          throw new Error(`unexpected GET ${path}`);
+        }),
+        post,
+      } as never,
+    });
+    useHermesChat.setState({ messages: [], status: "idle" });
+    render(<ChatTab />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Claude Code harness, Unavailable" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect Claude" }));
+
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      "/api/terminal/sessions",
+      expect.objectContaining({ cmd: "claude" }),
+    ));
+    expect(useTabs.getState().tabs).toContainEqual(expect.objectContaining({
+      kind: "terminal",
+      title: "Connect Claude",
+    }));
+  });
+
+  it("persists Global Chat effort and permission selections", async () => {
+    const catalog = createLegacyGlobalProviderCatalog({ hasProject: true });
+    const availableCatalog = {
+      ...catalog,
+      instances: catalog.instances.map((instance) => ({
+        ...instance,
+        availability: "available" as const,
+        models: instance.models.map((model) => ({ ...model, availability: "available" as const })),
+        defaultSelection: { instanceId: instance.id, model: instance.models[0]!.id, options: [] },
+      })),
+    };
+    useConnection.setState({
+      api: {
+        get: vi.fn(async (path: string) => {
+          if (path === "/api/chat-providers") return availableCatalog;
+          throw new Error(`unexpected GET ${path}`);
+        }),
+      } as never,
+    });
+    useHermesChat.setState({ messages: [], status: "idle" });
+    render(<ChatTab />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reasoning" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Reasoning" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "High" }));
+    fireEvent.click(screen.getByRole("button", { name: "Permission mode" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "full access" }));
+
+    expect(useProviderPreferences.getState().composerSelections.hermes_default).toEqual({
+      options: [{ id: "effort", value: "high" }],
+      permissionMode: "full_access",
+    });
   });
 
   it("explains when a coding harness cannot open without a project", () => {
@@ -581,10 +711,9 @@ describe("ChatTab", () => {
 
     render(<ChatTab />);
 
-    const codex = screen.getByRole("option", {
-      name: "Codex — Create a project to use Codex.",
-    });
-    expect((codex as HTMLOptionElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    const codex = screen.getByRole("button", { name: "Codex harness, Unavailable" });
+    expect(codex.getAttribute("aria-disabled")).toBe("true");
   });
 
   it("does not intercept a text-only drop in Chat", () => {

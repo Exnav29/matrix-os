@@ -14,6 +14,7 @@ import { useProjectWorkspaces } from "../../desktop/src/renderer/src/stores/proj
 import { useProjectChatLauncher } from "../../desktop/src/renderer/src/lib/project-chat";
 import { clearDraftChats, useDraftChat } from "../../desktop/src/renderer/src/stores/draft-chat";
 import { codingAgentRuntimeScope } from "../../desktop/src/shared/coding-agent-project-workspace";
+import { setSharedComposerText } from "./shared-chat-composer-test-utils";
 
 const NOW = "2026-07-12T12:00:00.000Z";
 const RUNTIME_SCOPE = codingAgentRuntimeScope({
@@ -221,7 +222,7 @@ function resetStores() {
     runtimeScope: RUNTIME_SCOPE,
     hydratedScope: RUNTIME_SCOPE,
   });
-  useProviderPreferences.setState({ defaultProviderId: null, hydrated: false });
+  useProviderPreferences.setState({ defaultProviderId: null, composerSelections: {}, hydrated: false });
   useCodingAgentWorkspace.setState({
     status: "idle",
     summary: null,
@@ -271,6 +272,7 @@ describe("draft chat replaces the selected thread", () => {
   it("deselects the current thread and shows the draft composer when the rail + is clicked", async () => {
     mockOperator();
     await renderWithSelectedThread();
+    const listedChatsBefore = screen.getAllByRole("button", { name: /^Chat / }).map((row) => row.textContent);
 
     fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
 
@@ -283,6 +285,9 @@ describe("draft chat replaces the selected thread", () => {
     expect(screen.queryByLabelText("Agent run prompt")).toBeNull();
     // No rail row keeps the current-page marker while drafting.
     expect(screen.getByRole("button", { name: "Chat Plan the auth work" }).getAttribute("aria-current")).toBeNull();
+    expect(screen.getAllByRole("button", { name: /^Chat / }).map((row) => row.textContent))
+      .toEqual(listedChatsBefore);
+    expect(screen.queryByRole("button", { name: /Chat New (chat|conversation)/i })).toBeNull();
   });
 
   it("deselects the current thread and focuses the draft composer for a compose request (⌘J)", async () => {
@@ -293,7 +298,7 @@ describe("draft chat replaces the selected thread", () => {
       useProjectChatLauncher.getState().requestComposer("matrix-os");
     });
 
-    const composer = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
+    const composer = await screen.findByLabelText("Message new chat");
     expect(useProjectView.getState().selectedThreadFor("matrix-os")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(composer));
   });
@@ -305,8 +310,8 @@ describe("draft chat replaces the selected thread", () => {
 
     fireEvent.keyDown(window, { key: "h" });
 
-    const composer = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
-    await waitFor(() => expect(composer.value).toBe("h"));
+    const composer = await screen.findByLabelText("Message new chat");
+    await waitFor(() => expect(composer.textContent).toBe("h"));
     expect(useProjectView.getState().selectedThreadFor("matrix-os")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(composer));
   });
@@ -315,15 +320,15 @@ describe("draft chat replaces the selected thread", () => {
     mockOperator();
     await renderWithSelectedThread();
     fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
-    const composer = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
+    const composer = await screen.findByLabelText("Message new chat");
 
-    fireEvent.change(composer, { target: { value: "hello" } });
+    await setSharedComposerText(composer, "hello");
     // Focus left the composer (e.g. the user clicked the transcript area).
     (document.activeElement as HTMLElement | null)?.blur?.();
     fireEvent.keyDown(window, { key: "!" });
 
-    await waitFor(() => expect(composer.value).toBe("hello!"));
-    expect(composer.value).not.toContain("---");
+    await waitFor(() => expect(composer.textContent).toBe("hello!"));
+    expect(composer.textContent).not.toContain("---");
   });
 
   it("seeds the draft prompt when a suggestion chip is clicked", async () => {
@@ -334,8 +339,8 @@ describe("draft chat replaces the selected thread", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Review my recent changes" }));
 
-    const composer = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
-    await waitFor(() => expect(composer.value).toBe("Review my recent changes"));
+    const composer = await screen.findByLabelText("Message new chat");
+    await waitFor(() => expect(composer.textContent).toBe("Review my recent changes"));
     // Exactly one composer exists — the draft pane never duplicates the form.
     expect(screen.getAllByLabelText("Message new chat")).toHaveLength(1);
     expect(screen.queryByLabelText("Agent run prompt")).toBeNull();
@@ -358,9 +363,9 @@ describe("draft chat replaces the selected thread", () => {
     mockOperator();
     await renderWithSelectedThread();
     fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
-    const composer = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
-    fireEvent.change(composer, { target: { value: "half-written thought" } });
-    await waitFor(() => expect(composer.value).toBe("half-written thought"));
+    const composer = await screen.findByLabelText("Message new chat");
+    await setSharedComposerText(composer, "half-written thought");
+    await waitFor(() => expect(composer.textContent).toBe("half-written thought"));
 
     // Selecting a thread unmounts the draft pane (inspector access); the
     // composed input must survive the round trip.
@@ -369,8 +374,8 @@ describe("draft chat replaces the selected thread", () => {
     expect(screen.queryByLabelText("Message new chat")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
-    const restored = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
-    await waitFor(() => expect(restored.value).toBe("half-written thought"));
+    const restored = await screen.findByLabelText("Message new chat");
+    await waitFor(() => expect(restored.textContent).toBe("half-written thought"));
   });
 
   it("preserves a provider-only draft across thread selection and back", async () => {
@@ -379,37 +384,42 @@ describe("draft chat replaces the selected thread", () => {
     fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
     await screen.findByLabelText("Message new chat");
 
-    const provider = (await screen.findByLabelText("Agent provider")) as HTMLSelectElement;
-    fireEvent.change(provider, { target: { value: "claude" } });
-    await waitFor(() => expect(provider.value).toBe("claude"));
+    const provider = await screen.findByRole("button", { name: "Choose model and provider" });
+    fireEvent.click(provider);
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code harness, Available" }));
+    fireEvent.click(screen.getByRole("option", { name: /Claude Code · Available/ }));
+    await waitFor(() => expect(provider.getAttribute("data-provider-instance")).toBe("claude_code_default"));
     await waitFor(() => expect(useDraftChat.getState().draftFor("matrix-os")?.providerId).toBe("claude"));
-    expect((screen.getByLabelText("Message new chat") as HTMLTextAreaElement).value).toBe("");
+    expect(screen.getByLabelText("Message new chat").textContent).toBe("");
 
     fireEvent.click(screen.getByRole("button", { name: "Chat Plan the auth work" }));
     expect(await screen.findByRole("region", { name: "Conversation Plan the auth work" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
     await screen.findByLabelText("Message new chat");
-    await waitFor(() => expect((screen.getByLabelText("Agent provider") as HTMLSelectElement).value).toBe("claude"));
-    expect((screen.getByLabelText("Message new chat") as HTMLTextAreaElement).value).toBe("");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Choose model and provider" }).getAttribute("data-provider-instance")).toBe("claude_code_default"));
+    expect(screen.getByLabelText("Message new chat").textContent).toBe("");
   });
 
-  it("preserves a mode-only draft across thread selection and back", async () => {
+  it("preserves a permission-only draft across thread selection and back", async () => {
     mockOperator();
     await renderWithSelectedThread();
     fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
+    await screen.findByLabelText("Message new chat");
 
-    const mode = (await screen.findByLabelText("Agent mode")) as HTMLSelectElement;
-    fireEvent.change(mode, { target: { value: "plan" } });
-    await waitFor(() => expect(mode.value).toBe("plan"));
-    expect((screen.getByLabelText("Message new chat") as HTMLTextAreaElement).value).toBe("");
+    const permission = await screen.findByRole("button", { name: "Permission mode" });
+    fireEvent.click(permission);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "full access" }));
+    await waitFor(() => expect(permission.textContent).toContain("full access"));
+    await waitFor(() => expect(useDraftChat.getState().draftFor("matrix-os")?.sandboxMode).toBe("full_access"));
+    expect(screen.getByLabelText("Message new chat").textContent).toBe("");
 
     fireEvent.click(screen.getByRole("button", { name: "Chat Plan the auth work" }));
     expect(await screen.findByRole("region", { name: "Conversation Plan the auth work" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
-    await waitFor(() => expect((screen.getByLabelText("Agent mode") as HTMLSelectElement).value).toBe("plan"));
-    expect((screen.getByLabelText("Message new chat") as HTMLTextAreaElement).value).toBe("");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Permission mode" }).textContent).toContain("full access"));
+    expect(screen.getByLabelText("Message new chat").textContent).toBe("");
   });
 
   it("does not clear a newer thread selection when project targeting resolves late", async () => {
@@ -451,10 +461,10 @@ describe("draft chat replaces the selected thread", () => {
     // The seeded follow-up lands in the draft composer, replacing the
     // selected thread — not in a separate inspector form.
     expect(await screen.findByText("What should we work on?")).toBeTruthy();
-    const composer = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
+    const composer = await screen.findByLabelText("Message new chat");
     await waitFor(() => {
-      expect(composer.value).toContain("Please follow up on this review hunk.");
-      expect(composer.value).toContain("PR #758");
+      expect(composer.textContent).toContain("Please follow up on this review hunk.");
+      expect(composer.textContent).toContain("PR #758");
     });
     expect(useProjectView.getState().selectedThreadFor("matrix-os")).toBeNull();
     expect(screen.queryByLabelText("Agent run prompt")).toBeNull();

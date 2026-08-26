@@ -181,6 +181,7 @@ interface HermesChatState {
   contextSequence: number;
   transcriptRevision: number;
   seenReplayEventIds: string[];
+  providerInstanceLocked: boolean;
   send: (text: string) => void;
   abort: () => void;
   newChat: () => void;
@@ -248,6 +249,7 @@ export const useHermesChat = create<HermesChatState>()((set, get) => ({
   contextSequence: 0,
   transcriptRevision: 0,
   seenReplayEventIds: [],
+  providerInstanceLocked: false,
 
   send: (text) => {
     const trimmed = text.trim();
@@ -309,6 +311,7 @@ export const useHermesChat = create<HermesChatState>()((set, get) => ({
       contextStatus: "idle",
       contextError: null,
       seenReplayEventIds: [],
+      providerInstanceLocked: false,
       transcriptRevision: state.transcriptRevision + 1,
     }));
   },
@@ -348,9 +351,20 @@ export const useHermesChat = create<HermesChatState>()((set, get) => ({
           !contextMutationActiveAtStart
           && state.contextSequence === contextSequenceAtStart
           && state.contextStatus !== "loading";
+        const conversations = canApplySelectedContext || !state.sessionId
+          ? snapshot.conversations
+          : snapshot.conversations.map((conversation) => {
+              if (conversation.id !== state.sessionId) return conversation;
+              if (state.conversationContext) {
+                return { ...conversation, context: state.conversationContext };
+              }
+              const withoutContext = { ...conversation };
+              delete withoutContext.context;
+              return withoutContext;
+            });
 
         return {
-          conversations: snapshot.conversations,
+          conversations,
           isConversationIndexComplete: snapshot.complete,
           indexStatus: "ready",
           indexError: null,
@@ -406,6 +420,7 @@ export const useHermesChat = create<HermesChatState>()((set, get) => ({
         contextStatus: "ready",
         contextError: null,
         seenReplayEventIds: [],
+        providerInstanceLocked: false,
         transcriptRevision: state.transcriptRevision + 1,
       }));
       switchKernelSession(parsed.data.id);
@@ -459,6 +474,7 @@ export const useHermesChat = create<HermesChatState>()((set, get) => ({
         contextError: null,
         contextSequence: state.contextSequence + 1,
         seenReplayEventIds: [],
+        providerInstanceLocked: snapshot.messages.length > 0,
         transcriptRevision: state.transcriptRevision + 1,
       }));
       // The history endpoint excludes assistant/tool rows from an active run,
@@ -499,6 +515,7 @@ export const useHermesChat = create<HermesChatState>()((set, get) => ({
         status: "idle",
         activeRequestId: null,
         seenReplayEventIds: [],
+        providerInstanceLocked: snapshot.messages.length > 0,
         transcriptRevision: current.transcriptRevision + 1,
       }));
       return true;
@@ -659,6 +676,7 @@ export const useHermesChat = create<HermesChatState>()((set, get) => ({
       contextSequence: state.contextSequence + 1,
       transcriptRevision: state.transcriptRevision + 1,
       seenReplayEventIds: [],
+      providerInstanceLocked: false,
     }));
   },
 
@@ -677,6 +695,7 @@ export const useHermesChat = create<HermesChatState>()((set, get) => ({
         sessionId: event.sessionId,
         activeRequestId,
         status: "thinking",
+        providerInstanceLocked: true,
       });
     }
     // Only fold events for the selected conversation's in-flight request.

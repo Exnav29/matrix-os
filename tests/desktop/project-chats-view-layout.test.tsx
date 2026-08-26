@@ -7,6 +7,7 @@ import type { ProjectAgentWorkspace, RuntimeSummary } from "@matrix-os/contracts
 import ProjectChatsView from "../../desktop/src/renderer/src/features/project/ProjectChatsView";
 import { useCodingAgentWorkspace } from "../../desktop/src/renderer/src/stores/coding-agent-workspace";
 import { useConnection } from "../../desktop/src/renderer/src/stores/connection";
+import { useHermesChat } from "../../desktop/src/renderer/src/stores/hermes-chat";
 import {
   taskKeyFor,
   useInspectorLayout,
@@ -117,6 +118,14 @@ function workspaceFixture(): ProjectAgentWorkspace {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 interface SavedLayout {
   taskKey: string;
   layout: { visible: Record<string, boolean>; sizes: Record<string, number> };
@@ -206,6 +215,7 @@ function resetStores() {
     runtimeSlot: "primary",
     api: null,
   });
+  useHermesChat.setState(useHermesChat.getInitialState(), true);
 }
 
 async function openInspector(): Promise<void> {
@@ -305,6 +315,166 @@ describe("ProjectChatsView hero layout", () => {
 
     expect(await screen.findByRole("button", { name: "Show conversation tools" })).toBeTruthy();
     expect(screen.queryByRole("complementary", { name: "Conversation tools" })).toBeNull();
+  });
+
+  it("shows project-bound Global Chats in the same rail and opens the shared chat surface", async () => {
+    mockOperator();
+    const get = vi.fn(async (path: string) => {
+      if (path.startsWith("/api/conversations/conversation-project")) {
+        return {
+          id: "conversation-project",
+          createdAt: 10,
+          updatedAt: 20,
+          context: {
+            projectId: "matrix-os",
+            projectName: "Matrix OS",
+            projectKind: "github",
+            status: "ready",
+          },
+          totalCount: 1,
+          messages: [{ index: 0, role: "user", content: "Project launch plan", contentTruncated: false, timestamp: 10 }],
+          hasMore: false,
+          limit: 50,
+        };
+      }
+      throw new Error(`unexpected api path ${path}`);
+    });
+    useConnection.setState({ api: { get } as never });
+    useHermesChat.setState({
+      indexStatus: "ready",
+      conversations: [{
+        id: "conversation-project",
+        title: "Release plan",
+        preview: "Project launch plan",
+        messageCount: 1,
+        createdAt: 10,
+        updatedAt: 20,
+        context: {
+          projectId: "matrix-os",
+          projectName: "Matrix OS",
+          projectKind: "github",
+          status: "ready",
+        },
+      }],
+    });
+
+    render(<ProjectChatsView projectId="matrix-os" active />);
+    fireEvent.click(await screen.findByRole("button", { name: "Chat Release plan" }));
+
+    expect(await screen.findByRole("region", { name: "Hermes conversation" })).toBeTruthy();
+    expect(await screen.findByText("Project launch plan")).toBeTruthy();
+    expect(screen.queryByRole("complementary", { name: "Conversation tools" })).toBeNull();
+  });
+
+  it("keeps a Chat visible in its Project when an older index refresh settles after the move", async () => {
+    mockOperator();
+    const staleContext = {
+      projectId: "legacy-project",
+      projectName: "Legacy project",
+      projectKind: "folder" as const,
+      repositoryLabel: "legacy-project",
+      status: "unavailable" as const,
+    };
+    const projectContext = {
+      projectId: "matrix-os",
+      projectName: "Matrix OS",
+      projectKind: "github" as const,
+      repositoryLabel: "FinnaAI/matrix-os",
+      status: "ready" as const,
+    };
+    const pendingIndex = deferred<unknown>();
+    let conversationIndexRequests = 0;
+    const api = {
+      get: vi.fn((path: string) => {
+        if (path !== "/api/conversations") {
+          throw new Error(`unexpected api path ${path}`);
+        }
+        conversationIndexRequests += 1;
+        if (conversationIndexRequests === 1) return pendingIndex.promise;
+        return Promise.resolve([{
+          id: "conversation-project",
+          preview: "Project launch plan",
+          messageCount: 1,
+          createdAt: 10,
+          updatedAt: 20,
+          context: projectContext,
+        }]);
+      }),
+      patch: vi.fn().mockResolvedValue({ context: projectContext }),
+    } as never;
+    useConnection.setState({ api });
+    useHermesChat.setState({
+      sessionId: "conversation-project",
+      view: "conversation",
+      conversations: [{
+        id: "conversation-project",
+        title: "Release plan",
+        preview: "Project launch plan",
+        messageCount: 1,
+        createdAt: 10,
+        updatedAt: 20,
+        context: staleContext,
+      }],
+      conversationContext: staleContext,
+      contextStatus: "ready",
+      indexStatus: "ready",
+    });
+
+    const refresh = useHermesChat.getState().refreshConversations(api);
+    await expect(useHermesChat.getState().updateConversationContext(
+      api,
+      "conversation-project",
+      "matrix-os",
+    )).resolves.toBe(true);
+    pendingIndex.resolve([{
+      id: "conversation-project",
+      preview: "Project launch plan",
+      messageCount: 1,
+      createdAt: 10,
+      updatedAt: 20,
+      context: staleContext,
+    }]);
+    await refresh;
+
+    render(<ProjectChatsView projectId="matrix-os" active />);
+
+    expect(await screen.findByRole("button", { name: "Chat Project launch plan" })).toBeTruthy();
+  });
+
+  it("refreshes an already-ready Chat index when its Project becomes active", async () => {
+    mockOperator();
+    const get = vi.fn(async (path: string) => {
+      if (path === "/api/conversations") {
+        return [{
+          id: "conversation-project",
+          preview: "Project launch plan",
+          messageCount: 1,
+          createdAt: 10,
+          updatedAt: 20,
+          context: {
+            projectId: "matrix-os",
+            projectName: "Matrix OS",
+            projectKind: "github",
+            repositoryLabel: "FinnaAI/matrix-os",
+            status: "ready",
+          },
+        }];
+      }
+      throw new Error(`unexpected api path ${path}`);
+    });
+    useConnection.setState({ api: { get } as never });
+    useHermesChat.setState({
+      indexStatus: "ready",
+      conversations: [],
+    });
+
+    render(<ProjectChatsView projectId="matrix-os" active />);
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/api/conversations"));
+    await waitFor(() => expect(useHermesChat.getState().conversations).toEqual([
+      expect.objectContaining({ id: "conversation-project" }),
+    ]));
+    expect(await screen.findByRole("button", { name: "Chat Project launch plan" })).toBeTruthy();
   });
 
   it("does not record a rail selection when its snapshot fails to load", async () => {

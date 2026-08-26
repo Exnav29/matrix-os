@@ -1,39 +1,55 @@
-import { Code2, FolderOpen, GitBranch, Plus, Sparkles } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { BrandLogo } from "../../design/BrandPanel";
-import { ConversationProviderSelector } from "../../components/conversation/provider-selector";
-import type { ConversationProviderIcon } from "../../components/conversation/provider-options";
+import type { AgentProviderSummary } from "@matrix-os/contracts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConversationTranscript } from "../../components/conversation/transcript";
 import { useConnection } from "../../stores/connection";
+import { useBoard } from "../../stores/board";
+import { useCodingAgentWorkspace } from "../../stores/coding-agent-workspace";
 import { useHermesChat, type HermesStatus } from "../../stores/hermes-chat";
 import { useTabs } from "../../stores/tabs";
-import { defaultProjectId, openProjectChat } from "../../lib/project-chat";
 import { useProviderPreferences } from "../settings/provider-preferences";
 import { AttachmentPreviewRow } from "./attachments/AttachmentPreviewRow";
 import { appendHermesAttachmentPaths } from "./attachments/local-attachment-controller";
 import { useConversationAttachments } from "./attachments/use-conversation-attachments";
-import { PromptInput } from "./elements/prompt-input";
-import { ChatResourcesPanel } from "./ChatResourcesPanel";
+import { ChatStarterCards } from "./ChatStarterCards";
 import {
-  ConversationContextControls,
-  ConversationContextFeedback,
-} from "./ConversationContextComposer";
+  SharedChatComposer,
+  type ComposerReferenceToken,
+  type SharedChatComposerSubmission,
+} from "./SharedChatComposer";
+import { SharedChatSurface } from "./SharedChatSurface";
+import {
+  createLegacyGlobalProviderCatalog,
+  filterCatalogForLegacyGlobal,
+  legacyGlobalSelectionExecutable,
+} from "./canonical-composer-adapter";
+import {
+  applyCanonicalComposerPreference,
+  createCanonicalComposerSelection,
+  type CanonicalComposerSelection,
+} from "./canonical-composer-state";
+import { useChatProviderCatalog } from "./chat-provider-catalog";
+import { searchGlobalChatResources } from "./chat-resource-search";
+import { useProviderSetup } from "./use-provider-setup";
+import { ConversationContextFeedback } from "./ConversationContextComposer";
+import ConversationContextPicker from "./ConversationContextPicker";
 import { hermesConversationPresentation } from "./hermes-presentation";
 import { HermesConversationIndex } from "./HermesConversationIndex";
-import { createGlobalChatProviderRegistry } from "./global-chat-providers";
+
+const EMPTY_PROVIDER_SUMMARIES: AgentProviderSummary[] = [];
 
 export function canSubmitChatDraft(
   draft: string,
   status: HermesStatus,
   attachmentCount = 0,
   contextBlocksSend = false,
+  referenceCount = 0,
 ): boolean {
-  return (draft.trim().length > 0 || attachmentCount > 0)
+  return (draft.trim().length > 0 || attachmentCount > 0 || referenceCount > 0)
     && status === "idle"
     && !contextBlocksSend;
 }
 
-function HermesPane() {
+export function HermesPane() {
   const api = useConnection((state) => state.api);
   const messages = useHermesChat((state) => state.messages);
   const sessionId = useHermesChat((state) => state.sessionId);
@@ -43,19 +59,66 @@ function HermesPane() {
   const conversationContext = useHermesChat((state) => state.conversationContext);
   const contextStatus = useHermesChat((state) => state.contextStatus);
   const contextError = useHermesChat((state) => state.contextError);
+  const providerInstanceLocked = useHermesChat((state) => state.providerInstanceLocked);
   const send = useHermesChat((state) => state.send);
+  const newChat = useHermesChat((state) => state.newChat);
   const abort = useHermesChat((state) => state.abort);
   const updateConversationContext = useHermesChat((state) => state.updateConversationContext);
   const recordRecentHermesConversation = useTabs((state) => state.recordRecentHermesConversation);
   const setDefaultProvider = useProviderPreferences((state) => state.setDefaultProvider);
+  const composerSelections = useProviderPreferences((state) => state.composerSelections);
+  const setComposerSelection = useProviderPreferences((state) => state.setComposerSelection);
   const [draft, setDraft] = useState("");
+  const [referenceTokens, setReferenceTokens] = useState<ComposerReferenceToken[]>([]);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
-  const [resourcesOpen, setResourcesOpen] = useState(false);
-  const [harnessError, setHarnessError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const resourcesTriggerRef = useRef<HTMLButtonElement>(null);
   const attachments = useConversationAttachments(sessionId);
-  const codexProjectId = defaultProjectId();
+  const projects = useBoard((state) => state.projects);
+  const fallbackCatalog = useMemo(
+    () => createLegacyGlobalProviderCatalog({ hasProject: projects.length > 0 }),
+    [projects.length],
+  );
+  const canonicalProviderCatalog = useChatProviderCatalog(fallbackCatalog).catalog;
+  const providerCatalog = useMemo(
+    () => filterCatalogForLegacyGlobal(canonicalProviderCatalog),
+    [canonicalProviderCatalog],
+  );
+  const runtimeProviderSummary = useCodingAgentWorkspace((state) => state.summary);
+  const runtimeProviderStatus = useCodingAgentWorkspace((state) => state.status);
+  const refreshRuntimeProviderSummary = useCodingAgentWorkspace((state) => state.refresh);
+  const [canonicalSelection, setCanonicalSelection] = useState<CanonicalComposerSelection | null>(
+    () => createCanonicalComposerSelection(fallbackCatalog, "hermes_default"),
+  );
+  const handleProviderSetup = useProviderSetup(
+    runtimeProviderSummary?.providers ?? EMPTY_PROVIDER_SUMMARIES,
+    refreshRuntimeProviderSummary,
+  );
+
+  useEffect(() => {
+    if (!api || runtimeProviderStatus !== "idle") return;
+    void refreshRuntimeProviderSummary();
+  }, [api, refreshRuntimeProviderSummary, runtimeProviderStatus]);
+
+  useEffect(() => {
+    setCanonicalSelection((current) => {
+      if (current && providerCatalog.instances.some((instance) => (
+        instance.id === current.instanceId
+        && instance.models.some((model) => model.id === current.model && model.availability === "available")
+      ))) return applyCanonicalComposerPreference(
+        providerCatalog,
+        current,
+        composerSelections[current.instanceId],
+      );
+      const next = createCanonicalComposerSelection(providerCatalog);
+      return next
+        ? applyCanonicalComposerPreference(providerCatalog, next, composerSelections[next.instanceId])
+        : null;
+    });
+  }, [composerSelections, providerCatalog]);
+
+  useEffect(() => {
+    void useProviderPreferences.getState().hydrate();
+  }, []);
 
   const turns = hermesConversationPresentation(messages, status, activeRequestId);
   const copyText = useCallback(async (text: string) => {
@@ -72,57 +135,48 @@ function HermesPane() {
     || !api
     || !sessionId;
 
-  const closeResources = useCallback((restoreFocus = true) => {
-    setResourcesOpen(false);
-    if (restoreFocus) {
-      window.requestAnimationFrame(() => resourcesTriggerRef.current?.focus());
-    }
-  }, []);
-
-  const submit = async () => {
+  const submit = async (submission: SharedChatComposerSubmission) => {
+    const selectedInstance = providerCatalog.instances.find((candidate) => (
+      candidate.id === canonicalSelection?.instanceId
+    ));
+    const supportsNativeAttachments = selectedInstance?.supports.attachments.some((kind) => (
+      kind === "file" || kind === "image"
+    )) ?? false;
     if (
       uploadingAttachments
-      || !canSubmitChatDraft(draft, status, attachments.items.length, contextPreventsSend)
+      || !legacyGlobalSelectionExecutable(providerCatalog, canonicalSelection)
+      || (attachments.items.length > 0 && !supportsNativeAttachments)
+      || !canSubmitChatDraft(
+        draft,
+        status,
+        attachments.items.length,
+        contextPreventsSend,
+        referenceTokens.length,
+      )
     ) return;
     setUploadingAttachments(true);
     try {
       const uploaded = await attachments.uploadAll();
       if (!uploaded.ok) return;
-      const submittedDraft = draft.trim();
-      send(appendHermesAttachmentPaths(draft, uploaded.paths));
+      const submittedDraft = submission.text;
+      send(appendHermesAttachmentPaths(submission.agentPrompt, uploaded.paths));
       if (sessionId) {
         const knownTitle = useHermesChat.getState().conversations
           .find((conversation) => conversation.id === sessionId)?.title;
         const label = submittedDraft.replace(/\s+/g, " ").slice(0, 80)
+          || submission.invocations[0]?.invocation
+          || submission.resources[0]?.label
           || knownTitle
           || "Shared files";
         recordRecentHermesConversation(sessionId, label);
       }
       setDraft("");
+      setReferenceTokens([]);
       attachments.clear();
     } finally {
       setUploadingAttachments(false);
     }
   };
-
-  const startCodexChat = useCallback(async () => {
-    const projectId = defaultProjectId();
-    if (!projectId) {
-      setHarnessError("Create a project before starting a Codex chat.");
-      return;
-    }
-    setHarnessError(null);
-    setDefaultProvider("codex");
-    if (!await openProjectChat(projectId, { compose: true })) {
-      setHarnessError("Codex chat could not be opened. Try again from the project.");
-    }
-  }, [setDefaultProvider]);
-  const providerRegistry = createGlobalChatProviderRegistry({
-    hermesReady: Boolean(api),
-    hasProject: Boolean(codexProjectId),
-    onUseCurrentConversation: () => setDefaultProvider("hermes"),
-    onOpenProjectConversation: startCodexChat,
-  });
 
   const attachmentPreviews = (
     <AttachmentPreviewRow
@@ -136,73 +190,28 @@ function HermesPane() {
     if (!api || !sessionId || contextControlsDisabled) return;
     void updateConversationContext(api, sessionId, projectId);
   }, [api, contextControlsDisabled, sessionId, updateConversationContext]);
-  const composerReady = canSubmitChatDraft(
+  const composerReady = legacyGlobalSelectionExecutable(providerCatalog, canonicalSelection)
+    && canSubmitChatDraft(
     draft,
     status,
     attachments.items.length,
     contextPreventsSend,
-  );
-  const composerControls = (
-    <>
-      <button
-        type="button"
-        aria-label="Attach files"
-        className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-[var(--bg-hover)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
-        style={{ color: "var(--text-secondary)" }}
-        disabled={uploadingAttachments}
-        onClick={() => fileInputRef.current?.click()}
-      >
-        <Plus size={16} aria-hidden />
-      </button>
-      <button
-        ref={resourcesTriggerRef}
-        type="button"
-        aria-label="Resources"
-        aria-expanded={resourcesOpen}
-        className="flex h-8 items-center gap-1.5 rounded-lg px-2 text-sm hover:bg-[var(--bg-hover)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
-        style={{ color: "var(--text-secondary)" }}
-        onClick={() => setResourcesOpen((open) => !open)}
-      >
-        <FolderOpen size={15} aria-hidden />
-      </button>
-      <button
-        type="button"
-        aria-label="Use Codex for a project chat"
-        className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-[var(--bg-hover)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
-        style={{ color: "var(--text-secondary)" }}
-        onClick={() => void startCodexChat()}
-      >
-        <GitBranch size={15} aria-hidden />
-      </button>
-    </>
-  );
-  const harnessBadge = (
-    <ConversationProviderSelector
-      value={providerRegistry.selectedId}
-      options={providerRegistry.options}
-      renderIcon={(icon: ConversationProviderIcon) => icon === "hermes"
-        ? <Sparkles className="size-3.5" />
-        : <Code2 className="size-3.5" />}
-      onSelect={(providerId) => void providerRegistry.activate(providerId)}
+    referenceTokens.length,
+    );
+  const resourceSearch = useCallback((query: string) => {
+    if (!api) return Promise.resolve([]);
+    const projectId = conversationContext?.status === "ready" ? conversationContext.projectId : null;
+    return searchGlobalChatResources(api, projectId, query);
+  }, [api, conversationContext]);
+  const projectContextControl = (
+    <ConversationContextPicker
+      context={conversationContext}
+      disabled={contextControlsDisabled}
+      compact={!conversationContext}
+      triggerLabel={conversationContext ? undefined : "Choose project for chat"}
+      onSelect={updateProjectContext}
+      onRemove={() => updateProjectContext(null)}
     />
-  );
-  const contextStrip = (
-    <div
-      className="flex min-w-0 flex-col gap-2 px-1 text-sm"
-      style={{ color: "var(--text-tertiary)" }}
-    >
-      <ConversationContextControls
-        context={conversationContext}
-        disabled={contextControlsDisabled}
-        onUpdate={updateProjectContext}
-      />
-      <ConversationContextFeedback
-        context={conversationContext}
-        disabled={contextControlsDisabled}
-        error={contextError}
-        onUpdate={updateProjectContext}
-      />
-    </div>
   );
   const renderComposer = (placeholder: string, autoFocus = false) => (
     <>
@@ -218,22 +227,47 @@ function HermesPane() {
         }}
       />
       <div className="flex min-w-0 flex-col gap-2">
-        <PromptInput
+        <SharedChatComposer
           value={draft}
           onChange={setDraft}
-          onSubmit={() => void submit()}
+          referenceTokens={referenceTokens}
+          onReferenceTokensChange={setReferenceTokens}
+          onSubmit={(submission) => void submit(submission)}
           onAbort={status !== "idle" ? abort : undefined}
           busy={status !== "idle" || uploadingAttachments}
           disabled={uploadingAttachments}
           canSubmit={composerReady}
+          catalog={providerCatalog}
+          selection={canonicalSelection}
+          onSelectionChange={(selection) => {
+            const instance = providerCatalog.instances.find((candidate) => candidate.id === selection.instanceId);
+            const providerId = instance?.driverKind === "claude_code" ? "claude" : instance?.driverKind;
+            if (providerId) setDefaultProvider(providerId);
+            setComposerSelection(selection);
+            setCanonicalSelection(selection);
+          }}
+          onProviderSetup={(instance, action) => void handleProviderSetup(instance, action)}
+          onNewChat={newChat}
+          instanceLocked={providerInstanceLocked}
+          resources={projects.map((project) => ({
+            kind: "project" as const,
+            id: project.slug,
+            label: project.name,
+          }))}
+          resourceSearch={resourceSearch}
+          onAttach={() => fileInputRef.current?.click()}
           attachments={attachmentPreviews}
           autoFocus={autoFocus}
           placeholder={placeholder}
           ariaLabel={placeholder}
-          controls={composerControls}
-          trailingControls={harnessBadge}
+          leadingControls={projectContextControl}
         />
-        {contextStrip}
+        <ConversationContextFeedback
+          context={conversationContext}
+          disabled={contextControlsDisabled}
+          error={contextError}
+          onUpdate={updateProjectContext}
+        />
       </div>
     </>
   );
@@ -245,29 +279,23 @@ function HermesPane() {
   ) : null;
 
   return (
-    <div
-      role="region"
-      aria-label="Hermes conversation"
+    <SharedChatSurface
+      ariaLabel="Hermes conversation"
       className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
       {...attachments.paneProps}
     >
       {loadErrorBanner}
-      {harnessError ? (
-        <div role="alert" className="mx-auto mt-3 w-[calc(100%-2.5rem)] max-w-[868px] rounded-lg border px-3 py-2 text-sm" style={{ borderColor: "var(--border-subtle)", color: "var(--text-secondary)" }}>
-          {harnessError}
-        </div>
-      ) : null}
       {empty ? (
         <div data-testid="chat-empty-content" className="mx-auto flex min-h-0 w-full max-w-[868px] flex-1 flex-col justify-center gap-[26px] px-5 py-8">
           <div className="flex shrink-0 flex-col items-center gap-[26px] text-center">
-            <BrandLogo size={208} color="var(--text-primary)" testId="chat-empty-logo" />
             <h1
-              className="text-[32px] font-medium leading-tight tracking-[-0.02em] sm:text-[36px]"
-              style={{ color: "var(--text-primary)", fontFamily: '"Instrument Serif", Georgia, serif' }}
+              className="text-[32px] font-semibold leading-tight tracking-[-0.02em]"
+              style={{ color: "var(--text-primary)" }}
             >
-              How can I help you?
+              What should we build today?
             </h1>
           </div>
+          <ChatStarterCards onSelect={setDraft} />
           <div className="shrink-0">{renderComposer("How can I help you today?", true)}</div>
         </div>
       ) : (
@@ -278,18 +306,7 @@ function HermesPane() {
           </div>
         </>
       )}
-
-      {resourcesOpen ? (
-        <ChatResourcesPanel
-          messages={messages}
-          onClose={closeResources}
-          onUpload={() => {
-            fileInputRef.current?.click();
-            closeResources(false);
-          }}
-        />
-      ) : null}
-    </div>
+    </SharedChatSurface>
   );
 }
 

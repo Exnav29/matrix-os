@@ -3,7 +3,10 @@
 import React from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProjectAgentWorkspace, RuntimeSummary } from "@matrix-os/contracts";
+import {
+  type ProjectAgentWorkspace,
+  type RuntimeSummary,
+} from "@matrix-os/contracts";
 import ProjectChatsView from "../../desktop/src/renderer/src/features/project/ProjectChatsView";
 import { useProviderPreferences } from "../../desktop/src/renderer/src/features/settings/provider-preferences";
 import { useCodingAgentWorkspace } from "../../desktop/src/renderer/src/stores/coding-agent-workspace";
@@ -151,7 +154,7 @@ function resetStores() {
   useProjectChatLauncher.setState({ composerRequest: null });
   useTabs.setState(useTabs.getInitialState(), true);
   useInspectorLayout.setState({ entries: {}, runtimeScope: null });
-  useProviderPreferences.setState({ defaultProviderId: null, hydrated: false });
+  useProviderPreferences.setState({ defaultProviderId: null, composerSelections: {}, hydrated: false });
   useCodingAgentWorkspace.setState({
     status: "idle",
     summary: null,
@@ -182,7 +185,14 @@ async function openDraft() {
   render(<ProjectChatsView projectId="matrix-os" active />);
   await screen.findByRole("region", { name: "Conversation Plan the auth work" });
   fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
-  return (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
+  return await screen.findByLabelText("Message new chat");
+}
+
+async function setComposerText(composer: HTMLElement, value: string) {
+  for (const key of value) {
+    fireEvent.keyDown(window, { key });
+  }
+  await waitFor(() => expect(composer.textContent).toBe(value));
 }
 
 describe("draft chat implicit thread creation", () => {
@@ -200,7 +210,7 @@ describe("draft chat implicit thread creation", () => {
     const { invoke } = mockOperator();
     const composer = await openDraft();
 
-    fireEvent.change(composer, { target: { value: "Investigate the flaky desktop check" } });
+    await setComposerText(composer, "Investigate the flaky desktop check");
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => {
@@ -239,7 +249,7 @@ describe("draft chat implicit thread creation", () => {
     const { invoke } = mockOperator();
     const composer = await openDraft();
 
-    fireEvent.change(composer, { target: { value: "Summarize the release notes" } });
+    await setComposerText(composer, "Summarize the release notes");
     fireEvent.keyDown(composer, { key: "Enter" });
 
     await waitFor(() => {
@@ -253,12 +263,30 @@ describe("draft chat implicit thread creation", () => {
     });
   });
 
+  it("sends Project Chat resource tokens as explicit agent context", async () => {
+    const { invoke } = mockOperator();
+    const composer = await openDraft();
+    await setComposerText(composer, "Inspect @Matrix");
+
+    fireEvent.click(await screen.findByRole("option", { name: /Matrix OS/ }));
+
+    expect(await screen.findByTestId("composer-reference-token-project-matrix-os")).toBeTruthy();
+    await waitFor(() => expect(composer.textContent).toBe("Inspect Matrix OS "));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(
+      "runtime:create-thread",
+      expect.objectContaining({
+        prompt: "Inspect [Matrix OS](matrix-os)",
+      }),
+    ));
+  });
+
   it.each([
     {
       name: "no provider",
       providers: [],
-      notice: "No coding agent provider is configured",
-      action: "Open provider settings",
+      availability: "Unavailable",
     },
     {
       name: "missing provider install",
@@ -274,7 +302,7 @@ describe("draft chat implicit thread creation", () => {
           command: "npm install -g @openai/codex",
         }],
       }],
-      notice: "Codex is not installed",
+      availability: "Setup required",
       action: "Install Codex",
     },
     {
@@ -290,7 +318,7 @@ describe("draft chat implicit thread creation", () => {
           command: "codex login",
         }],
       }],
-      notice: "Connect Codex to continue",
+      availability: "Authentication required",
       action: "Connect Codex",
     },
     {
@@ -306,7 +334,7 @@ describe("draft chat implicit thread creation", () => {
           command: "codex login",
         }],
       }],
-      notice: "Codex needs to be reconnected",
+      availability: "Authentication required",
       action: "Reconnect Codex",
     },
     {
@@ -317,8 +345,7 @@ describe("draft chat implicit thread creation", () => {
         installStatus: "installing" as const,
         authStatus: "unknown" as const,
       }],
-      notice: "Installing Codex",
-      action: "Refresh provider status",
+      availability: "Setup required",
     },
     {
       name: "unverified provider",
@@ -328,22 +355,26 @@ describe("draft chat implicit thread creation", () => {
         installStatus: "unknown" as const,
         authStatus: "unknown" as const,
       }],
-      notice: "Matrix could not verify Codex",
-      action: "Refresh provider status",
+      availability: "Unavailable",
     },
-  ])("blocks $name without losing the editable draft", async ({ providers, notice, action }) => {
+  ])("blocks $name in the canonical picker without losing the editable draft", async ({ name, providers, availability, action }) => {
     const { invoke } = mockOperator({ summary: summaryFixture(providers) });
     const composer = await openDraft();
-    const prompt = `Preserve this ${notice}`;
+    const prompt = `Preserve this ${name}`;
 
-    fireEvent.change(composer, { target: { value: prompt } });
+    await setComposerText(composer, prompt);
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     fireEvent.keyDown(composer, { key: "Enter" });
 
-    expect(screen.getByText(notice)).toBeTruthy();
-    expect(screen.getByRole("button", { name: action })).toBeTruthy();
-    expect(composer.disabled).toBe(false);
-    expect(composer.value).toBe(prompt);
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    const harness = screen.getByRole("button", { name: `Codex harness, ${availability}` });
+    expect(harness.className).toContain("opacity-35");
+    if (action) {
+      fireEvent.click(harness);
+      expect(screen.getByRole("button", { name: action })).toBeTruthy();
+    }
+    expect(composer.getAttribute("contenteditable")).toBe("true");
+    expect(composer.textContent).toBe(prompt);
     expect(useDraftChat.getState().draftFor("matrix-os")?.prompt).toBe(prompt);
     expect(vi.mocked(invoke).mock.calls.filter(([channel]) => channel === "runtime:create-thread")).toHaveLength(0);
   });
@@ -356,9 +387,9 @@ describe("draft chat implicit thread creation", () => {
     act(() => {
       useProjectView.getState().setSelectedThread("matrix-os", null);
     });
-    const composer = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
+    const composer = await screen.findByLabelText("Message new chat");
 
-    fireEvent.change(composer, { target: { value: "Direct draft with no seed" } });
+    await setComposerText(composer, "Direct draft with no seed");
     fireEvent.keyDown(composer, { key: "Enter" });
 
     await waitFor(() => {
@@ -381,15 +412,15 @@ describe("draft chat implicit thread creation", () => {
     act(() => {
       useProjectView.getState().setSelectedThread("matrix-os", null);
     });
-    const composer = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
+    const composer = await screen.findByLabelText("Message new chat");
 
-    fireEvent.change(composer, { target: { value: "Keep the complete prompt" } });
+    await setComposerText(composer, "Keep the complete prompt");
     fireEvent.keyDown(composer, { key: "Enter" });
 
     await waitFor(() => {
       expect(resolveNewChatTarget).toHaveBeenCalledWith("matrix-os");
     });
-    expect(composer.disabled).toBe(true);
+    expect(composer.getAttribute("contenteditable")).toBe("false");
     expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
     expect(vi.mocked(invoke).mock.calls.filter(([channel]) => channel === "runtime:create-thread")).toHaveLength(0);
 
@@ -414,7 +445,7 @@ describe("draft chat implicit thread creation", () => {
     });
     const composer = await openDraft();
 
-    fireEvent.change(composer, { target: { value: "Wait for me" } });
+    await setComposerText(composer, "Wait for me");
     const send = screen.getByRole("button", { name: "Send" });
     fireEvent.click(send);
 
@@ -439,15 +470,24 @@ describe("draft chat implicit thread creation", () => {
     });
     const composer = await openDraft();
 
-    fireEvent.change(composer, { target: { value: "Keep this draft text" } });
+    await setComposerText(composer, "Keep this draft text");
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     expect(await screen.findByText("Agent run could not be started. Try again.")).toBeTruthy();
     expect(screen.queryByText(/home\/matrix|token|secret/i)).toBeNull();
     // The draft survives the failure so the user can retry.
-    expect(composer.value).toBe("Keep this draft text");
+    expect(composer.textContent).toBe("Keep this draft text");
     expect(screen.getByLabelText("Message new chat")).toBeTruthy();
     expect(useProjectView.getState().selectedThreadFor("matrix-os")).toBeNull();
+  });
+
+  it("keeps downward Project Chat composer menus outside the draft clipping boundary", async () => {
+    mockOperator();
+    await openDraft();
+
+    const pane = screen.getByRole("region", { name: "New chat in Matrix OS" });
+    expect(pane.className).toContain("overflow-visible");
+    expect(pane.className).not.toContain("overflow-hidden");
   });
 
   it("uploads dropped files and creates a project chat with existing structured refs", async () => {
@@ -465,7 +505,7 @@ describe("draft chat implicit thread creation", () => {
     });
 
     expect(await screen.findByRole("button", { name: "Remove context.txt" })).toBeTruthy();
-    fireEvent.change(composer, { target: { value: "Use this context" } });
+    await setComposerText(composer, "Use this context");
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => {

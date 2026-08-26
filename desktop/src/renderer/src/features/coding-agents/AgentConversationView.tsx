@@ -33,6 +33,7 @@ import {
   useCodingAgentWorkspace,
 } from "../../stores/coding-agent-workspace";
 import { useTabs } from "../../stores/tabs";
+import { useConnection } from "../../stores/connection";
 import { safeUrlTransform } from "../editor/MarkdownPreview";
 import {
   Attachment,
@@ -46,12 +47,26 @@ import { Bubble, BubbleContent } from "../chat/elements/bubble";
 import { Conversation, ConversationContent, ConversationItem } from "../chat/elements/conversation";
 import { Marker, MarkerContent, MarkerIcon } from "../chat/elements/marker";
 import { Message, MessageContent, MessageFooter } from "../chat/elements/message";
-import { PromptInput } from "../chat/elements/prompt-input";
 import { AttachmentPreviewRow } from "../chat/attachments/AttachmentPreviewRow";
 import { useConversationAttachments } from "../chat/attachments/use-conversation-attachments";
 import { abortAgentThread, agentThreadAbortSupported } from "./abort-thread";
-import { AgentComposerPickers } from "./composer-pickers";
-import { ProviderReadinessNotice } from "./ProviderReadinessNotice";
+import {
+  SharedChatComposer,
+  type ComposerReferenceToken,
+  type SharedChatComposerSubmission,
+} from "../chat/SharedChatComposer";
+import {
+  createLegacyProjectProviderCatalog,
+  filterCatalogForLegacyProject,
+  instanceIdForLegacyProvider,
+} from "../chat/canonical-composer-adapter";
+import {
+  createCanonicalComposerSelection,
+  type CanonicalComposerSelection,
+} from "../chat/canonical-composer-state";
+import { useChatProviderCatalog } from "../chat/chat-provider-catalog";
+import { searchProjectChatResources } from "../chat/chat-resource-search";
+import { useProviderSetup } from "../chat/use-provider-setup";
 import {
   deriveProviderReadiness,
   type ProviderReadinessPresentation,
@@ -644,38 +659,76 @@ function TranscriptItem({
 
 function ConversationComposer({
   threadId,
+  projectId,
   threadLabel,
+  providerId,
   waitingForAction,
   threadBusy,
-  composerControls,
   attachments,
   readiness,
-  providers,
+  summary,
 }: {
   threadId: string;
+  projectId?: string;
   threadLabel: string;
+  providerId: string;
   waitingForAction: boolean;
   threadBusy: boolean;
-  // Left side of the composer bottom row (provider/mode pickers).
-  composerControls?: ReactNode;
   attachments: ReturnType<typeof useConversationAttachments>;
   readiness?: ProviderReadinessPresentation;
-  providers: RuntimeSummary["providers"];
+  summary?: RuntimeSummary;
 }) {
   const [message, setMessage] = useState("");
+  const [referenceTokens, setReferenceTokens] = useState<ComposerReferenceToken[]>([]);
+  const api = useConnection((state) => state.api);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
   const turnStatus = useCodingAgentWorkspace((state) => state.turnStatus);
   const turnThreadId = useCodingAgentWorkspace((state) => state.turnThreadId);
   const turnError = useCodingAgentWorkspace((state) => state.turnError);
   const send = useCodingAgentWorkspace((state) => state.sendThreadMessage);
+  const refreshSummary = useCodingAgentWorkspace((state) => state.refresh);
   const submitting = turnStatus === "submitting" && turnThreadId === threadId;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fallbackCatalog = useMemo(() => summary
+    ? createLegacyProjectProviderCatalog(summary)
+    : { revision: "legacy_empty", drivers: [], instances: [] }, [summary]);
+  const loadedCatalog = useChatProviderCatalog(fallbackCatalog).catalog;
+  const projectCatalog = useMemo(() => summary
+    ? filterCatalogForLegacyProject(loadedCatalog, summary)
+    : fallbackCatalog, [fallbackCatalog, loadedCatalog, summary]);
+  const preferredInstanceId = summary
+    ? instanceIdForLegacyProvider(projectCatalog, summary, providerId)
+    : undefined;
+  const providerStillExists = Boolean(summary?.providers.some((provider) => provider.id === providerId));
+  const [selection, setSelection] = useState<CanonicalComposerSelection | null>(
+    () => providerStillExists
+      ? createCanonicalComposerSelection(fallbackCatalog, preferredInstanceId)
+      : null,
+  );
+  const handleProviderSetup = useProviderSetup(summary?.providers ?? [], refreshSummary);
+
+  useEffect(() => {
+    setSelection((current) => {
+      if (!providerStillExists) return null;
+      const preferred = createCanonicalComposerSelection(projectCatalog, preferredInstanceId);
+      if (!preferred) return null;
+      return current
+        && current.instanceId === preferred.instanceId
+        && projectCatalog.instances.some((instance) => (
+          instance.id === current.instanceId
+          && instance.models.some((model) => model.id === current.model && model.availability === "available")
+        ))
+        ? current
+        : preferred;
+    });
+  }, [preferredInstanceId, projectCatalog, providerStillExists]);
   // Stop renders while the thread is busy and the preload bridge carries the
   // "runtime:abort-thread" channel (see abort-thread.ts).
   const abortSupported = agentThreadAbortSupported();
 
-  async function submit() {
+  async function submit(submission: SharedChatComposerSubmission) {
     if (
-      (!message.trim() && attachments.items.length === 0)
+      (!submission.agentPrompt && attachments.items.length === 0)
       || readiness?.blocked
       || waitingForAction
       || threadBusy
@@ -695,12 +748,13 @@ function ConversationComposer({
       if (!uploaded.ok) return;
       const sent = await send({
         threadId,
-        message: message.trim() || "Please inspect the attached files.",
+        message: submission.agentPrompt || "Please inspect the attached files.",
         ...(uploaded.attachments.length > 0 ? { attachments: uploaded.attachments } : {}),
       });
       if (sent) {
         useTabs.getState().recordRecentConversation(threadId, threadLabel);
         setMessage("");
+        setReferenceTokens([]);
         attachments.clear();
       }
     } finally {
@@ -713,22 +767,26 @@ function ConversationComposer({
       {/* Floating composer card: same centered column as the transcript; the
           rounded/shadowed surface itself lives on PromptInput's prompt-card. */}
       <div className="mx-auto w-full max-w-[46rem]" data-slot="conversation-composer">
-        {readiness ? (
-          <div className="mb-2">
-            <ProviderReadinessNotice
-              readiness={readiness}
-              providers={providers}
-              onRefresh={() => useCodingAgentWorkspace.getState().refresh()}
-            />
-          </div>
-        ) : null}
         {turnThreadId === threadId && turnError ? (
           <p className="mb-1 px-1 text-xs" style={{ color: "var(--danger)" }}>{turnError}</p>
         ) : null}
-        <PromptInput
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          aria-label="Choose files"
+          className="sr-only"
+          onChange={(event) => {
+            attachments.add(Array.from(event.currentTarget.files ?? []));
+            event.currentTarget.value = "";
+          }}
+        />
+        <SharedChatComposer
           value={message}
           onChange={setMessage}
-          onSubmit={() => void submit()}
+          referenceTokens={referenceTokens}
+          onReferenceTokensChange={setReferenceTokens}
+          onSubmit={(submission) => void submit(submission)}
           onAbort={abortSupported && (submitting || threadBusy) ? () => void abortAgentThread(threadId) : undefined}
           busy={submitting || threadBusy || uploadingAttachments}
           disabled={waitingForAction || uploadingAttachments}
@@ -738,8 +796,19 @@ function ConversationComposer({
             && !threadBusy
             && !submitting
             && !uploadingAttachments
-            && (message.trim().length > 0 || attachments.items.length > 0)
+            && (message.trim().length > 0 || attachments.items.length > 0 || referenceTokens.length > 0)
           }
+          catalog={projectCatalog}
+          selection={selection}
+          onSelectionChange={setSelection}
+          onProviderSetup={(instance, action) => void handleProviderSetup(instance, action)}
+          instanceLocked
+          unavailableProviderLabel={selection ? undefined : `${providerId} (unavailable)`}
+          resources={projectId ? [{ kind: "project", id: projectId, label: projectId }] : []}
+          resourceSearch={(query) => api && projectId
+            ? searchProjectChatResources(api, projectId, query)
+            : Promise.resolve([])}
+          onAttach={() => fileInputRef.current?.click()}
           attachments={(
             <AttachmentPreviewRow
               items={attachments.items}
@@ -757,7 +826,6 @@ function ConversationComposer({
             : threadBusy
               ? "Draft a follow-up…"
               : "Ask a follow-up…"}
-          controls={composerControls}
           footer={
             threadBusy && !waitingForAction ? (
               <span className="text-xs">Agent is working — draft now, send when this turn finishes</span>
@@ -927,22 +995,14 @@ export function AgentConversationView({
         <ConversationComposer
           key={`composer:${snapshot.thread.id}`}
           threadId={snapshot.thread.id}
+          projectId={snapshot.thread.projectId}
           threadLabel={snapshot.thread.title}
+          providerId={snapshot.thread.providerId}
           waitingForAction={snapshot.thread.status === "waiting_for_approval" || snapshot.thread.status === "waiting_for_input"}
           threadBusy={running}
           attachments={attachments}
           readiness={providerReadiness}
-          providers={summary?.providers ?? []}
-          composerControls={
-            summary ? (
-              <AgentComposerPickers
-                summary={summary}
-                providerId={snapshot.thread.providerId}
-                mode={undefined}
-                readOnly
-              />
-            ) : undefined
-          }
+          summary={summary}
         />
       ) : (
         <p

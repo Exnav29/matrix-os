@@ -1,0 +1,717 @@
+// @vitest-environment jsdom
+
+import React, { useState } from "react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CanonicalProviderCatalog } from "@matrix-os/contracts";
+import {
+  SharedChatComposer,
+  type ComposerReferenceToken,
+  type SharedChatComposerSubmission,
+} from "../../desktop/src/renderer/src/features/chat/SharedChatComposer";
+import {
+  createCanonicalComposerSelection,
+  type CanonicalComposerSelection,
+} from "../../desktop/src/renderer/src/features/chat/canonical-composer-state";
+
+function catalogFixture(): CanonicalProviderCatalog {
+  const support = {
+    rootChat: true,
+    resume: true,
+    cancellation: true,
+    attachments: ["file", "image"] as const,
+    tools: ["read", "write"],
+    approvals: true,
+    userInput: true,
+    worktrees: "optional" as const,
+    resources: ["file", "folder", "project"] as const,
+    interactionModes: ["default", "plan"],
+    permissionModes: ["supervised", "full_access"],
+  };
+  return {
+    revision: "catalog_fixture",
+    drivers: [
+      { kind: "hermes", displayName: "Hermes", adapterVersion: "1.0.0", capabilityClass: "system_agent" },
+      { kind: "openclaw", displayName: "OpenClaw", adapterVersion: "1.0.0", capabilityClass: "system_agent" },
+      { kind: "codex", displayName: "Codex", adapterVersion: "1.0.0", capabilityClass: "coding_agent" },
+      { kind: "claude_code", displayName: "Claude Code", adapterVersion: "1.0.0", capabilityClass: "coding_agent" },
+      { kind: "opencode", displayName: "OpenCode", adapterVersion: "1.0.0", capabilityClass: "coding_agent" },
+      { kind: "pi", displayName: "Pi", adapterVersion: "1.0.0", capabilityClass: "coding_agent" },
+    ],
+    instances: [
+      {
+        id: "hermes_default",
+        driverKind: "hermes",
+        displayName: "Hermes",
+        availability: "unavailable",
+        workspaceRequirement: "none",
+        catalogRevision: "catalog_fixture",
+        models: [],
+        options: [],
+        skills: [],
+        commands: [],
+        setupActions: [{ id: "hermes_settings", kind: "open_settings", label: "Configure Hermes" }],
+        supports: support,
+      },
+      {
+        id: "openclaw_default",
+        driverKind: "openclaw",
+        displayName: "OpenClaw",
+        availability: "unavailable",
+        workspaceRequirement: "none",
+        catalogRevision: "catalog_fixture",
+        models: [],
+        options: [],
+        skills: [],
+        commands: [],
+        setupActions: [{ id: "openclaw_settings", kind: "open_settings", label: "Configure OpenClaw" }],
+        supports: support,
+      },
+      {
+        id: "codex_work",
+        driverKind: "codex",
+        displayName: "Codex — Work",
+        availability: "available",
+        workspaceRequirement: "project_optional",
+        catalogRevision: "catalog_fixture",
+        models: [
+          { id: "gpt-5.6-sol", displayName: "GPT-5.6-Sol", availability: "available", capabilities: ["reasoning", "tools", "vision"], supportsVision: true, supportsToolUse: true },
+          { id: "gpt-5.6-terra", displayName: "GPT-5.6-Terra", availability: "available", capabilities: ["reasoning", "tools"], supportsVision: false, supportsToolUse: true },
+        ],
+        options: [{ id: "effort", label: "Reasoning", kind: "enum", values: [{ value: "low", label: "Low" }, { value: "high", label: "High" }], defaultValue: "low", placement: "composer" }],
+        skills: [{ id: "review", displayName: "Review", description: "Review the current changes", invocation: "/review" }],
+        commands: [{ id: "status", displayName: "Status", description: "Show repository status", invocation: "/status" }],
+        setupActions: [],
+        supports: support,
+        defaultSelection: { instanceId: "codex_work", model: "gpt-5.6-sol", options: [{ id: "effort", value: "low" }] },
+      },
+      {
+        id: "claude_personal",
+        driverKind: "claude_code",
+        displayName: "Claude — Personal",
+        availability: "available",
+        workspaceRequirement: "project_optional",
+        catalogRevision: "catalog_fixture",
+        models: [{ id: "claude-opus-4-6", displayName: "Claude Opus 4.6", availability: "available", capabilities: ["reasoning", "tools"], supportsVision: false, supportsToolUse: true }],
+        options: [],
+        skills: [],
+        commands: [],
+        setupActions: [],
+        supports: { ...support, attachments: [], resources: [] },
+        defaultSelection: { instanceId: "claude_personal", model: "claude-opus-4-6" },
+      },
+      {
+        id: "opencode_default",
+        driverKind: "opencode",
+        displayName: "OpenCode",
+        availability: "auth_required",
+        workspaceRequirement: "project_optional",
+        catalogRevision: "catalog_fixture",
+        models: [{ id: "provider-default", displayName: "Provider default", availability: "auth_required", capabilities: ["reasoning", "tools"], supportsVision: false, supportsToolUse: true }],
+        options: [],
+        skills: [],
+        commands: [],
+        setupActions: [{ id: "opencode_connect", kind: "open_settings", label: "Connect OpenCode" }],
+        supports: support,
+      },
+    ],
+  };
+}
+
+function fixedHermesCatalogFixture(): CanonicalProviderCatalog {
+  return {
+    revision: "catalog_hermes_fixed",
+    drivers: [
+      { kind: "hermes", displayName: "Hermes", adapterVersion: "1.0.0", capabilityClass: "system_agent" },
+    ],
+    instances: [{
+      id: "hermes_default",
+      driverKind: "hermes",
+      displayName: "Hermes",
+      availability: "available",
+      workspaceRequirement: "none",
+      catalogRevision: "catalog_hermes_fixed",
+      models: [{
+        id: "openai-codex:gpt-5.3-codex-spark",
+        displayName: "gpt-5.3-codex-spark",
+        availability: "available",
+        capabilities: ["tools"],
+        supportsVision: false,
+        supportsToolUse: true,
+      }],
+      options: [],
+      skills: [],
+      commands: [],
+      setupActions: [],
+      supports: {
+        rootChat: true,
+        resume: true,
+        cancellation: true,
+        attachments: ["file"],
+        tools: [],
+        approvals: false,
+        userInput: false,
+        worktrees: "none",
+        resources: ["file", "folder", "project"],
+        interactionModes: ["default"],
+        permissionModes: ["supervised"],
+      },
+      defaultSelection: {
+        instanceId: "hermes_default",
+        model: "openai-codex:gpt-5.3-codex-spark",
+      },
+    }],
+  };
+}
+
+function Harness({
+  locked = false,
+  onSubmit = vi.fn(),
+  resourceSearch,
+  menuSide,
+  onAttach = vi.fn(),
+  onProviderSetup = vi.fn(),
+  initialValue = "",
+  initialReferenceTokens = [],
+  onNewChat,
+}: {
+  locked?: boolean;
+  onSubmit?: (submission: SharedChatComposerSubmission) => void;
+  resourceSearch?: (query: string) => Promise<Array<{ kind: "file" | "folder"; id: string; label: string }>>;
+  menuSide?: "top" | "bottom";
+  onAttach?: () => void;
+  onProviderSetup?: (instanceId: string, actionId: string) => void;
+  initialValue?: string;
+  initialReferenceTokens?: ComposerReferenceToken[];
+  onNewChat?: () => void;
+}) {
+  const catalog = catalogFixture();
+  const [value, setValue] = useState(initialValue);
+  const [selection, setSelection] = useState<CanonicalComposerSelection>(
+    () => createCanonicalComposerSelection(catalog)!,
+  );
+  const [referenceTokens, setReferenceTokens] = useState<ComposerReferenceToken[]>(initialReferenceTokens);
+  return (
+    <SharedChatComposer
+      value={value}
+      onChange={setValue}
+      referenceTokens={referenceTokens}
+      onReferenceTokensChange={setReferenceTokens}
+      onSubmit={onSubmit}
+      busy={false}
+      catalog={catalog}
+      selection={selection}
+      onSelectionChange={setSelection}
+      instanceLocked={locked}
+      onNewChat={onNewChat}
+      resources={[
+        { kind: "file", id: "src-index", label: "src/index.ts" },
+        { kind: "folder", id: "src", label: "src" },
+      ]}
+      resourceSearch={resourceSearch}
+      onAttach={onAttach}
+      onProviderSetup={(instance, action) => onProviderSetup(instance.id, action.id)}
+      menuSide={menuSide}
+    />
+  );
+}
+
+describe("SharedChatComposer", () => {
+  afterEach(cleanup);
+
+  it("renders the selected model and capability-backed controls in the Figma composer", () => {
+    const { container } = render(<Harness />);
+
+    expect(screen.getByRole("button", { name: "Choose model and provider" }).textContent)
+      .toContain("GPT-5.6-Sol");
+    expect(screen.getByRole("button", { name: "Add files and more" })).toBeTruthy();
+    expect(screen.getByLabelText("Reasoning")).toBeTruthy();
+    expect(screen.queryByLabelText("Interaction mode")).toBeNull();
+    expect(screen.getByLabelText("Permission mode")).toBeTruthy();
+    expect(container.querySelector(".prompt-card")?.classList.contains("overflow-hidden"))
+      .toBe(false);
+  });
+
+  it("renders the model picker outside clipping composer containers", () => {
+    render(<Harness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+
+    expect(screen.getByRole("listbox", { name: "Models and providers" }).closest(".prompt-card"))
+      .toBeNull();
+  });
+
+  it("uses a compact inline harness glyph for each model row", () => {
+    render(<Harness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    const option = screen.getByRole("option", { name: /GPT-5.6-Sol/ });
+    const glyph = option.querySelector<HTMLElement>('[data-provider-glyph="codex"]');
+
+    expect(glyph?.getAttribute("width")).toBe("13");
+    expect(glyph?.parentElement?.getAttribute("data-slot")).toBe("model-provider-glyph");
+  });
+
+  it("opens a Codex-style attachment menu before choosing files and folders", () => {
+    const onAttach = vi.fn();
+    render(<Harness onAttach={onAttach} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add files and more" }));
+    expect(onAttach).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("option", { name: "Files and folders" }));
+
+    expect(onAttach).toHaveBeenCalledOnce();
+  });
+
+  it("does not expose the native picker for structured-reference-only harnesses", () => {
+    const catalog = catalogFixture();
+    catalog.instances.push({
+      ...catalog.instances[2]!,
+      id: "pi_default",
+      driverKind: "pi",
+      displayName: "Pi",
+      supports: { ...catalog.instances[2]!.supports, attachments: ["structured_ref"] },
+      defaultSelection: { instanceId: "pi_default", model: "gpt-5.6-sol" },
+    });
+    const selection = createCanonicalComposerSelection(catalog, "pi_default")!;
+    render(
+      <SharedChatComposer
+        value=""
+        onChange={() => undefined}
+        onSubmit={() => undefined}
+        busy={false}
+        catalog={catalog}
+        selection={selection}
+        onSelectionChange={() => undefined}
+        instanceLocked={false}
+        onAttach={() => undefined}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Add files and more" })).toBeNull();
+  });
+
+  it("uses the same Add palette for @ and the paperclip", async () => {
+    const resourceSearch = vi.fn(async (query: string) => query === ""
+      ? [{ kind: "file" as const, id: "readme", label: "README.md" }]
+      : []);
+    render(<Harness resourceSearch={resourceSearch} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add files and more" }));
+    const paperclipPalette = await screen.findByRole("listbox", { name: "Add" });
+    expect(paperclipPalette.className).toContain("left-0");
+    expect(paperclipPalette.className).toContain("right-0");
+    expect(screen.getByRole("option", { name: /README.md/ })).toBeTruthy();
+
+    cleanup();
+    render(<Harness resourceSearch={resourceSearch} initialValue="@" />);
+
+    const mentionPalette = await screen.findByRole("listbox", { name: "Add" });
+    expect(mentionPalette.className).toContain("left-0");
+    expect(mentionPalette.className).toContain("right-0");
+    expect(screen.getByRole("option", { name: "Files and folders" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /README.md/ })).toBeTruthy();
+  });
+
+  it("records a safe diagnostic when remote resource search fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const resourceSearch = vi.fn(async () => Promise.reject(new Error("private provider details")));
+    render(<Harness resourceSearch={resourceSearch} initialValue="@read" />);
+
+    await waitFor(() => expect(warn).toHaveBeenCalledWith("Chat resource search failed"));
+    expect(screen.queryByRole("option", { name: /private provider details/ })).toBeNull();
+
+    warn.mockRestore();
+  });
+
+  it.each([
+    { label: "paperclip", initialValue: "", open: () => fireEvent.click(screen.getByRole("button", { name: "Add files and more" })), menu: "Add" },
+    { label: "resource mention", initialValue: "@", open: () => undefined, menu: "Add" },
+    { label: "slash command", initialValue: "/", open: () => undefined, menu: "Skills and commands" },
+  ])("dismisses the $label menu when the user clicks outside the composer", async ({ initialValue, open, menu }) => {
+    const resourceSearch = vi.fn(async () => [
+      { kind: "file" as const, id: "readme", label: "README.md" },
+    ]);
+    render(<Harness resourceSearch={resourceSearch} initialValue={initialValue} />);
+
+    open();
+    expect(await screen.findByRole("listbox", { name: menu })).toBeTruthy();
+    fireEvent.pointerDown(document.body);
+
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: menu })).toBeNull());
+  });
+
+  it("changes effort and permission through in-app menus", () => {
+    render(<Harness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Reasoning" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "High" }));
+    expect(screen.getByRole("button", { name: "Reasoning" }).textContent).toContain("High");
+
+    fireEvent.click(screen.getByRole("button", { name: "Permission mode" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "full access" }));
+    expect(screen.getByRole("button", { name: "Permission mode" }).textContent).toContain("full access");
+  });
+
+  it("opens all Project Chat composer menus below the top composer", () => {
+    render(<Harness menuSide="bottom" initialValue="/" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    expect(screen.getByRole("listbox", { name: "Models and providers" })
+      .closest('[data-slot="provider-model-picker"]')?.getAttribute("data-preferred-side"))
+      .toBe("bottom");
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Reasoning" }));
+    expect(screen.getByRole("menu", { name: "Reasoning options" }).getAttribute("data-preferred-side"))
+      .toBe("bottom");
+    fireEvent.click(screen.getByRole("button", { name: "Reasoning" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Permission mode" }));
+    expect(screen.getByRole("menu", { name: "Permission mode options" }).getAttribute("data-preferred-side"))
+      .toBe("bottom");
+
+    expect(screen.getByRole("listbox", { name: "Skills and commands" }).getAttribute("data-preferred-side"))
+      .toBe("bottom");
+  });
+
+  it("shows fixed Hermes effort and permission capabilities instead of hiding them", () => {
+    const catalog = fixedHermesCatalogFixture();
+    const selection = createCanonicalComposerSelection(catalog)!;
+    render(
+      <SharedChatComposer
+        value=""
+        onChange={() => undefined}
+        onSubmit={() => undefined}
+        busy={false}
+        catalog={catalog}
+        selection={selection}
+        onSelectionChange={() => undefined}
+        instanceLocked={false}
+      />,
+    );
+
+    const effort = screen.getByRole("button", { name: "Reasoning effort" });
+    expect(effort.textContent).toContain("Default");
+    expect(effort.hasAttribute("disabled")).toBe(true);
+    const permission = screen.getByRole("button", { name: "Permission mode" });
+    expect(permission.textContent).toContain("supervised");
+    expect(permission.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("labels a system-harness model with its actual model provider", () => {
+    const catalog = fixedHermesCatalogFixture();
+    const selection = createCanonicalComposerSelection(catalog)!;
+    render(
+      <SharedChatComposer
+        value=""
+        onChange={() => undefined}
+        onSubmit={() => undefined}
+        busy={false}
+        catalog={catalog}
+        selection={selection}
+        onSelectionChange={() => undefined}
+        instanceLocked={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    const model = screen.getByRole("option", { name: /gpt-5.3-codex-spark/ });
+
+    expect(model.textContent).toContain("OpenAI Codex");
+    expect(model.querySelector('[data-provider-glyph="codex"]')).toBeTruthy();
+    expect(model.querySelector('[data-provider-glyph="hermes"]')).toBeNull();
+  });
+
+  it("searches models and switches Provider Instance before the first Turn", () => {
+    render(<Harness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    expect(screen.queryByRole("option", { name: /Claude Opus 4.6/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code harness, Available" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search models" }), {
+      target: { value: "opus" },
+    });
+    fireEvent.click(screen.getByRole("option", { name: /Claude Opus 4.6/ }));
+
+    expect(screen.getByRole("button", { name: "Choose model and provider" }).textContent)
+      .toContain("Claude Opus 4.6");
+    expect(screen.queryByRole("button", { name: "Add files and more" })).toBeNull();
+  });
+
+  it("keeps unauthenticated harnesses dimmed but exposes setup inside the selector", () => {
+    const onProviderSetup = vi.fn();
+    render(<Harness onProviderSetup={onProviderSetup} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    const opencode = screen.getByRole("button", { name: "OpenCode harness, Authentication required" });
+
+    expect(opencode.getAttribute("aria-disabled")).toBe("false");
+    expect(opencode.hasAttribute("disabled")).toBe(false);
+    expect(opencode.className).toContain("opacity-35");
+    expect(opencode.getAttribute("title")).toContain("OpenCode — Authentication required");
+    fireEvent.click(opencode);
+    expect(screen.getByRole("option", { name: /Provider default.*OpenCode/ }).getAttribute("aria-disabled"))
+      .toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Connect OpenCode" }));
+    expect(onProviderSetup).toHaveBeenCalledWith("opencode_default", "opencode_connect");
+  });
+
+  it("offers system harness configuration and closes the catalog before navigation", () => {
+    const onProviderSetup = vi.fn();
+    render(<Harness onProviderSetup={onProviderSetup} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hermes harness, Unavailable" }));
+    fireEvent.click(screen.getByRole("button", { name: "Configure Hermes" }));
+
+    expect(onProviderSetup).toHaveBeenCalledWith("hermes_default", "hermes_settings");
+    expect(screen.queryByRole("listbox", { name: "Models and providers" })).toBeNull();
+  });
+
+  it("uses a recognizable product glyph for every Harness rail item", () => {
+    render(<Harness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    const generalAgents = screen.getByRole("group", { name: "General agents" });
+    const codingAgents = screen.getByRole("group", { name: "Coding agents" });
+    expect(within(generalAgents).getByRole("button", { name: "Hermes harness, Unavailable" })).toBeTruthy();
+    expect(within(generalAgents).getByRole("button", { name: "OpenClaw harness, Unavailable" })).toBeTruthy();
+    expect(within(codingAgents).getByRole("button", { name: "Codex harness, Available" })).toBeTruthy();
+    expect(within(codingAgents).getByRole("button", { name: "Claude Code harness, Available" })).toBeTruthy();
+    expect(within(codingAgents).getByRole("button", { name: "OpenCode harness, Authentication required" })).toBeTruthy();
+    expect(within(codingAgents).getByRole("button", { name: "Pi harness, Unavailable" })).toBeTruthy();
+    const harnesses = [
+      ["Hermes harness, Unavailable", "hermes"],
+      ["OpenClaw harness, Unavailable", "openclaw"],
+      ["Codex harness, Available", "codex"],
+      ["Claude Code harness, Available", "claude_code"],
+      ["OpenCode harness, Authentication required", "opencode"],
+      ["Pi harness, Unavailable", "pi"],
+    ] as const;
+
+    for (const [name, kind] of harnesses) {
+      expect(screen.getByRole("button", { name }).querySelector(`[data-provider-glyph="${kind}"]`))
+        .toBeTruthy();
+    }
+    expect(screen.getByRole("button", { name: "Hermes harness, Unavailable" })
+      .querySelector('img[data-provider-glyph="hermes"]')?.getAttribute("src"))
+      .toContain("hermes-provider.png");
+  });
+
+  it("keeps model selection available but explains the locked Instance", () => {
+    const onNewChat = vi.fn();
+    render(<Harness locked onNewChat={onNewChat} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    expect(screen.getByText("Provider Instance is locked after the first Turn.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Claude Code harness, Available" }).getAttribute("aria-disabled"))
+      .toBe("true");
+    fireEvent.click(screen.getByRole("option", { name: /GPT-5.6-Terra/ }));
+    expect(screen.getByRole("button", { name: "Choose model and provider" }).textContent)
+      .toContain("GPT-5.6-Terra");
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start a new chat" }));
+    expect(onNewChat).toHaveBeenCalledOnce();
+  });
+
+  it("keeps unavailable harness setup reachable after the Instance locks", () => {
+    const onProviderSetup = vi.fn();
+    render(<Harness locked onProviderSetup={onProviderSetup} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    const opencode = screen.getByRole("button", { name: "OpenCode harness, Authentication required" });
+    expect(opencode.getAttribute("aria-disabled")).toBe("false");
+
+    fireEvent.click(opencode);
+    fireEvent.click(screen.getByRole("button", { name: "Connect OpenCode" }));
+
+    expect(onProviderSetup).toHaveBeenCalledWith("opencode_default", "opencode_connect");
+    expect(screen.getByRole("button", { name: "Choose model and provider" }).textContent)
+      .toContain("GPT-5.6-Sol");
+  });
+
+  it("turns a selected slash entry into an inline invocation token without an X control", async () => {
+    render(<Harness initialValue="/" />);
+    const input = screen.getByLabelText("Message chat");
+
+    const menu = screen.getByRole("listbox", { name: "Skills and commands" });
+    expect(menu).toBeTruthy();
+    const review = screen.getByRole("option", { name: /Review/ });
+    expect(review.querySelector('[data-slot="skill-command-icon"]')).toBeTruthy();
+    expect(review.querySelector('[data-slot="skill-command-name"]')?.className)
+      .toContain("whitespace-nowrap");
+    fireEvent.click(review);
+    await waitFor(() => expect(input.textContent).toBe("/review "));
+    const token = await screen.findByTestId("composer-reference-token-skill-review");
+    expect(token.textContent).toContain("/review");
+    expect(token.querySelector('[data-slot="composer-reference-token-icon"]')).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Remove skill /review" })).toBeNull();
+  });
+
+  it("removes an inline invocation token with Backspace at its trailing edge", async () => {
+    render(<Harness
+      initialValue="/review "
+      initialReferenceTokens={[{
+        type: "invocation",
+        label: "Review",
+        invocation: { kind: "skill", descriptorId: "review", invocation: "/review" },
+      }]}
+    />);
+
+    const input = screen.getByRole("textbox", { name: "Message chat" });
+    const token = screen.getByTestId("composer-reference-token-skill-review");
+    const decorator = token.closest('[data-lexical-decorator="true"]');
+    expect(decorator).toBeTruthy();
+
+    const range = document.createRange();
+    range.setStartAfter(decorator!);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    fireEvent(document, new Event("selectionchange"));
+    fireEvent.keyDown(input, { key: "Backspace", code: "Backspace" });
+
+    await waitFor(() => expect(screen.queryByTestId("composer-reference-token-skill-review")).toBeNull());
+  });
+
+  it("preserves arbitrary text, resource, and skill order inside one editable prompt", () => {
+    render(<Harness
+      initialValue="Inspect [src/index.ts](src-index) with /review please"
+      initialReferenceTokens={[
+        { type: "resource", resource: { kind: "file", id: "src-index", label: "src/index.ts" } },
+        {
+          type: "invocation",
+          label: "Review",
+          invocation: { kind: "skill", descriptorId: "review", invocation: "/review" },
+        },
+      ]}
+    />);
+
+    const promptFlow = screen.getByRole("textbox", { name: "Message chat" });
+    const skill = screen.getByTestId("composer-reference-token-skill-review");
+    const resource = screen.getByTestId("composer-reference-token-file-src-index");
+
+    expect(promptFlow).toBeTruthy();
+    expect(promptFlow?.contains(skill)).toBe(true);
+    expect(promptFlow?.contains(resource)).toBe(true);
+    expect(promptFlow.textContent).toBe("Inspect src/index.ts with /review please");
+    expect(resource.compareDocumentPosition(skill) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(resource.className).not.toContain("border");
+    expect(skill.className).not.toContain("border");
+    expect(resource.className).toContain("text-md");
+    expect(skill.className).toContain("text-md");
+    expect(resource.className).toContain("align-baseline");
+    expect(skill.className).toContain("align-baseline");
+    expect(resource.className).not.toContain("align-[-0.08em]");
+    expect(skill.className).not.toContain("align-[-0.08em]");
+    expect(resource.className).not.toContain("text-[0.92em]");
+    expect(screen.queryByRole("button", { name: "Remove file src/index.ts" })).toBeNull();
+    expect(resource.querySelector('[data-file-kind="code"]')).toBeTruthy();
+    expect(screen.queryByText("How can I help you today?")).toBeNull();
+    expect(document.querySelector('[data-slot="composer-context-row"]')).toBeNull();
+
+    expect(promptFlow.className).toContain("border-0");
+    expect(promptFlow.className).toContain("ring-0");
+    expect(promptFlow.className).toContain("pt-1");
+    expect(promptFlow.className).not.toContain("pt-3");
+  });
+
+  it("renders distinct T3-style file type glyphs for TypeScript and JSON references", () => {
+    render(<Harness
+      initialValue="Compare [apps/weather/src/main.tsx](tsx-file) and [apps/weather/tsconfig.json](json-file)"
+      initialReferenceTokens={[
+        { type: "resource", resource: { kind: "file", id: "tsx-file", label: "apps/weather/src/main.tsx" } },
+        { type: "resource", resource: { kind: "file", id: "json-file", label: "apps/weather/tsconfig.json" } },
+      ]}
+    />);
+
+    const tsxToken = screen.getByTestId("composer-reference-token-file-tsx-file");
+    const jsonToken = screen.getByTestId("composer-reference-token-file-json-file");
+    expect(tsxToken.querySelector('[data-file-icon-token="typescript"]')).toBeTruthy();
+    expect(jsonToken.querySelector('[data-file-icon-token="json"]')).toBeTruthy();
+  });
+
+  it("submits selected invocations and resources as structured agent-readable context", () => {
+    const onSubmit = vi.fn();
+    render(<Harness
+      onSubmit={onSubmit}
+      initialValue="/review Inspect [src/index.ts](src-index)"
+      initialReferenceTokens={[
+        {
+          type: "invocation",
+          label: "Review",
+          invocation: { kind: "skill", descriptorId: "review", invocation: "/review" },
+        },
+        { type: "resource", resource: { kind: "file", id: "src-index", label: "src/index.ts" } },
+      ]}
+    />);
+    const input = screen.getByLabelText("Message chat");
+
+    expect(input.textContent).toBe("/review Inspect src/index.ts");
+    expect(screen.getByTestId("composer-reference-token-file-src-index").textContent)
+      .toContain("src/index.ts");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledWith({
+      text: "/review Inspect [src/index.ts](src-index)",
+      agentPrompt: "/review Inspect [src/index.ts](src-index)",
+      invocations: [{ kind: "skill", descriptorId: "review", invocation: "/review" }],
+      resources: [{ kind: "file", id: "src-index", label: "src/index.ts" }],
+    });
+  });
+
+  it("searches workspace files and folders for @ mentions", async () => {
+    const resourceSearch = vi.fn(async (query: string) => query === "read"
+      ? [{ kind: "file" as const, id: "readme", label: "README.md" }]
+      : []);
+    render(<Harness resourceSearch={resourceSearch} initialValue="Inspect @read" />);
+    const input = screen.getByLabelText("Message chat");
+
+    await waitFor(() => expect(resourceSearch).toHaveBeenCalledWith("read"));
+    fireEvent.click(await screen.findByRole("option", { name: /README.md/ }));
+    await waitFor(() => expect(input.textContent).toBe("Inspect README.md "));
+    expect(screen.getByTestId("composer-reference-token-file-readme").textContent)
+      .toContain("README.md");
+  });
+
+  it("browses workspace files and folders immediately when @ opens", async () => {
+    const resourceSearch = vi.fn(async (query: string) => query === ""
+      ? [{ kind: "file" as const, id: "readme", label: "README.md" }]
+      : []);
+    render(<Harness resourceSearch={resourceSearch} initialValue="@" />);
+    const input = screen.getByLabelText("Message chat");
+
+    await waitFor(() => expect(resourceSearch).toHaveBeenCalledWith(""));
+    const readme = await screen.findByRole("option", { name: /README.md/ });
+    expect(readme.querySelector('[data-file-kind="document"]')).toBeTruthy();
+  });
+
+  it("navigates slash suggestions with arrows and Enter", async () => {
+    render(<Harness initialValue="/" />);
+    const input = screen.getByLabelText("Message chat");
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(input.textContent).toBe("/status "));
+    expect(screen.getByTestId("composer-reference-token-command-status").textContent)
+      .toContain("/status");
+  });
+
+  it("navigates the model picker from its search field", () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+    const search = screen.getByRole("searchbox", { name: "Search models" });
+
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: /GPT-5.6-Sol/ }));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: /GPT-5.6-Terra/ }));
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+
+    expect(screen.getByRole("button", { name: "Choose model and provider" }).textContent)
+      .toContain("GPT-5.6-Terra");
+  });
+});

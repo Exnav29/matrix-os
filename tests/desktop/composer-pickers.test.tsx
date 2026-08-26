@@ -13,6 +13,7 @@ import { useProjectView } from "../../desktop/src/renderer/src/stores/project-vi
 import { useProjectWorkspaces } from "../../desktop/src/renderer/src/stores/project-workspaces";
 import { clearDraftChats, useDraftChat } from "../../desktop/src/renderer/src/stores/draft-chat";
 import { useProjectChatLauncher } from "../../desktop/src/renderer/src/lib/project-chat";
+import { setSharedComposerText } from "./shared-chat-composer-test-utils";
 
 const NOW = "2026-07-12T12:00:00.000Z";
 
@@ -127,11 +128,16 @@ function createdThreadSnapshot(prompt: string, providerId: string) {
 
 function mockOperator({
   preferredProviderId,
+  preferredComposerSelections,
   loadPreferredProviderId,
   threadProviderId = "codex",
   summary = summaryFixture(),
 }: {
   preferredProviderId?: string;
+  preferredComposerSelections?: Record<string, {
+    options: Array<{ id: string; value: string | boolean }>;
+    permissionMode: string;
+  }>;
   loadPreferredProviderId?: () => Promise<string | null>;
   threadProviderId?: string;
   summary?: RuntimeSummary;
@@ -169,7 +175,14 @@ function mockOperator({
         const providerId = loadPreferredProviderId
           ? await loadPreferredProviderId()
           : preferredProviderId ?? null;
-        return { value: providerId ? { defaultProviderId: providerId } : null };
+        return {
+          value: providerId || preferredComposerSelections
+            ? {
+                defaultProviderId: providerId,
+                ...(preferredComposerSelections ? { composerSelections: preferredComposerSelections } : {}),
+              }
+            : null,
+        };
       }
       return { value: null };
     }
@@ -198,7 +211,7 @@ function resetStores() {
   useProjectWorkspaces.setState({ entries: {} });
   useProjectChatLauncher.setState({ composerRequest: null });
   useInspectorLayout.setState({ entries: {}, runtimeScope: null });
-  useProviderPreferences.setState({ defaultProviderId: null, hydrated: false });
+  useProviderPreferences.setState({ defaultProviderId: null, composerSelections: {}, hydrated: false });
   useCodingAgentWorkspace.setState({
     status: "idle",
     summary: null,
@@ -232,6 +245,19 @@ async function openDraftComposer() {
   await screen.findByLabelText("Message new chat");
 }
 
+function selectedProviderInstance(): string | null {
+  return screen.getByRole("button", { name: "Choose model and provider" })
+    .getAttribute("data-provider-instance");
+}
+
+async function chooseProvider(label: string) {
+  fireEvent.click(screen.getByRole("button", { name: "Choose model and provider" }));
+  fireEvent.click(screen.getByRole("button", {
+    name: `${label === "Claude" ? "Claude Code" : label} harness, Available`,
+  }));
+  fireEvent.click(screen.getByRole("option", { name: new RegExp(`Provider default.*${label}.*Available`) }));
+}
+
 describe("composer provider/mode pickers", () => {
   beforeEach(() => {
     globalThis.ResizeObserver = MockResizeObserver as typeof ResizeObserver;
@@ -243,31 +269,74 @@ describe("composer provider/mode pickers", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders provider and mode pickers inside the draft composer bar with contract defaults", async () => {
+  it("renders provider, effort, and permission controls inside the draft composer bar", async () => {
     mockOperator();
     await openDraftComposer();
 
-    const provider = (await screen.findByLabelText("Agent provider")) as HTMLSelectElement;
-    const mode = screen.getByLabelText("Agent mode") as HTMLSelectElement;
-    expect(provider.value).toBe("codex");
-    expect(mode.value).toBe("default");
-    // The pickers sit inside the floating composer card, Codex-style.
+    const provider = await screen.findByRole("button", { name: "Choose model and provider" });
+    const effort = screen.getByRole("button", { name: "Reasoning" });
+    const permission = screen.getByRole("button", { name: "Permission mode" });
+    expect(selectedProviderInstance()).toBe("codex_default");
+    expect(screen.queryByLabelText("Interaction mode")).toBeNull();
+    // The controls sit inside the floating composer card, Codex-style.
     expect(provider.closest(".prompt-card")).not.toBeNull();
-    expect(mode.closest(".prompt-card")).not.toBeNull();
+    expect(effort.closest(".prompt-card")).not.toBeNull();
+    expect(permission.closest(".prompt-card")).not.toBeNull();
     // Draft pickers are editable.
-    expect(provider.disabled).toBe(false);
-    expect(mode.disabled).toBe(false);
+    expect(provider.getAttribute("aria-expanded")).toBe("false");
+    expect(effort.getAttribute("aria-expanded")).toBe("false");
+    expect(permission.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("restores effort and permission when opening another new Project Chat", async () => {
+    mockOperator();
+    await openDraftComposer();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reasoning" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "High" }));
+    fireEvent.click(screen.getByRole("button", { name: "Permission mode" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "full access" }));
+    expect(useProviderPreferences.getState().composerSelections.codex_default).toEqual({
+      options: [{ id: "effort", value: "high" }],
+      permissionMode: "full_access",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat Plan the auth work" }));
+    await screen.findByRole("region", { name: "Conversation Plan the auth work" });
+    expect(useProviderPreferences.getState().composerSelections.codex_default?.options)
+      .toEqual([{ id: "effort", value: "high" }]);
+    fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
+    await screen.findByLabelText("Message new chat");
+
+    expect(screen.getByRole("button", { name: "Reasoning" }).textContent).toContain("High");
+    expect(screen.getByRole("button", { name: "Permission mode" }).textContent).toContain("full access");
+  });
+
+  it("hydrates effort and permission after a Desktop restart", async () => {
+    mockOperator({
+      preferredProviderId: "codex",
+      preferredComposerSelections: {
+        codex_default: {
+          options: [{ id: "effort", value: "high" }],
+          permissionMode: "full_access",
+        },
+      },
+    });
+    await openDraftComposer();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Reasoning" }).textContent).toContain("High");
+      expect(screen.getByRole("button", { name: "Permission mode" }).textContent).toContain("full access");
+    });
   });
 
   it("defaults the draft provider to the persisted provider preference", async () => {
     mockOperator({ preferredProviderId: "claude" });
     await openDraftComposer();
 
-    const provider = (await screen.findByLabelText("Agent provider")) as HTMLSelectElement;
-    const mode = screen.getByLabelText("Agent mode") as HTMLSelectElement;
-    await waitFor(() => expect(provider.value).toBe("claude"));
-    // The mode follows the preferred provider's default mode.
-    await waitFor(() => expect(mode.value).toBe("review"));
+    await screen.findByRole("button", { name: "Choose model and provider" });
+    await waitFor(() => expect(selectedProviderInstance()).toBe("claude_code_default"));
+    expect(screen.queryByLabelText("Interaction mode")).toBeNull();
   });
 
   it("ignores an unready persisted provider when choosing the draft default", async () => {
@@ -281,9 +350,9 @@ describe("composer provider/mode pickers", () => {
     mockOperator({ preferredProviderId: "claude", summary: unreadySummary });
     await openDraftComposer();
 
-    const provider = (await screen.findByLabelText("Agent provider")) as HTMLSelectElement;
-    await waitFor(() => expect(provider.value).toBe("codex"));
-    expect((screen.getByLabelText("Agent mode") as HTMLSelectElement).value).toBe("default");
+    await screen.findByRole("button", { name: "Choose model and provider" });
+    await waitFor(() => expect(selectedProviderInstance()).toBe("codex_default"));
+    expect(screen.queryByLabelText("Interaction mode")).toBeNull();
   });
 
   it("uses the preferred non-pi provider sandbox when pi is the runtime default", async () => {
@@ -293,10 +362,10 @@ describe("composer provider/mode pickers", () => {
     });
     await openDraftComposer();
 
-    const provider = (await screen.findByLabelText("Agent provider")) as HTMLSelectElement;
-    await waitFor(() => expect(provider.value).toBe("codex"));
-    const composer = screen.getByLabelText("Message new chat") as HTMLTextAreaElement;
-    fireEvent.change(composer, { target: { value: "Use my preferred provider" } });
+    await screen.findByRole("button", { name: "Choose model and provider" });
+    await waitFor(() => expect(selectedProviderInstance()).toBe("codex_default"));
+    const composer = screen.getByLabelText("Message new chat");
+    await setSharedComposerText(composer, "Use my preferred provider");
     fireEvent.keyDown(composer, { key: "Enter" });
 
     await waitFor(() => {
@@ -316,15 +385,15 @@ describe("composer provider/mode pickers", () => {
     });
     await openDraftComposer();
 
-    const provider = (await screen.findByLabelText("Agent provider")) as HTMLSelectElement;
-    expect(provider.value).toBe("codex");
+    await screen.findByRole("button", { name: "Choose model and provider" });
+    expect(selectedProviderInstance()).toBe("codex_default");
     await act(async () => {
       resolvePreference("claude");
       await Promise.resolve();
     });
 
-    await waitFor(() => expect(provider.value).toBe("claude"));
-    await waitFor(() => expect((screen.getByLabelText("Agent mode") as HTMLSelectElement).value).toBe("review"));
+    await waitFor(() => expect(selectedProviderInstance()).toBe("claude_code_default"));
+    expect(screen.queryByLabelText("Interaction mode")).toBeNull();
   });
 
   it("persists the hydrated provider when a prompt is typed before preferences load", async () => {
@@ -336,14 +405,14 @@ describe("composer provider/mode pickers", () => {
     });
     await openDraftComposer();
 
-    const composer = screen.getByLabelText("Message new chat") as HTMLTextAreaElement;
-    fireEvent.change(composer, { target: { value: "Keep the hydrated provider" } });
+    const composer = screen.getByLabelText("Message new chat");
+    await setSharedComposerText(composer, "Keep the hydrated provider");
     await act(async () => {
       resolvePreference("claude");
       await Promise.resolve();
     });
 
-    await waitFor(() => expect((screen.getByLabelText("Agent provider") as HTMLSelectElement).value).toBe("claude"));
+    await waitFor(() => expect(selectedProviderInstance()).toBe("claude_code_default"));
     await waitFor(() => expect(useDraftChat.getState().draftFor("matrix-os")).toMatchObject({
       providerId: "claude",
       mode: "review",
@@ -354,9 +423,9 @@ describe("composer provider/mode pickers", () => {
     await screen.findByRole("region", { name: "Conversation Plan the auth work" });
     fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
 
-    const restored = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
-    expect((screen.getByLabelText("Agent provider") as HTMLSelectElement).value).toBe("claude");
-    expect((screen.getByLabelText("Agent mode") as HTMLSelectElement).value).toBe("review");
+    const restored = await screen.findByLabelText("Message new chat");
+    expect(selectedProviderInstance()).toBe("claude_code_default");
+    expect(screen.queryByLabelText("Interaction mode")).toBeNull();
     fireEvent.keyDown(restored, { key: "Enter" });
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
@@ -375,8 +444,8 @@ describe("composer provider/mode pickers", () => {
     });
     await openDraftComposer();
 
-    const composer = screen.getByLabelText("Message new chat") as HTMLTextAreaElement;
-    fireEvent.change(composer, { target: { value: "Keep my prompt, not the transient provider" } });
+    const composer = screen.getByLabelText("Message new chat");
+    await setSharedComposerText(composer, "Keep my prompt, not the transient provider");
     await waitFor(() => expect(useDraftChat.getState().draftFor("matrix-os")?.prompt).toBe(
       "Keep my prompt, not the transient provider",
     ));
@@ -389,10 +458,10 @@ describe("composer provider/mode pickers", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "New chat in Matrix OS" }));
 
-    const restored = (await screen.findByLabelText("Message new chat")) as HTMLTextAreaElement;
-    await waitFor(() => expect((screen.getByLabelText("Agent provider") as HTMLSelectElement).value).toBe("claude"));
-    expect((screen.getByLabelText("Agent mode") as HTMLSelectElement).value).toBe("review");
-    expect(restored.value).toBe("Keep my prompt, not the transient provider");
+    const restored = await screen.findByLabelText("Message new chat");
+    await waitFor(() => expect(selectedProviderInstance()).toBe("claude_code_default"));
+    expect(screen.queryByLabelText("Interaction mode")).toBeNull();
+    expect(restored.textContent).toBe("Keep my prompt, not the transient provider");
     fireEvent.keyDown(restored, { key: "Enter" });
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
@@ -406,31 +475,29 @@ describe("composer provider/mode pickers", () => {
     });
   });
 
-  it("resets the mode to the new provider's default when the provider changes", async () => {
+  it("uses the new provider's default execution mode without exposing the legacy mode picker", async () => {
     mockOperator();
     await openDraftComposer();
 
-    const provider = (await screen.findByLabelText("Agent provider")) as HTMLSelectElement;
-    // Pick a non-default mode first so the reset is observable.
-    fireEvent.change(screen.getByLabelText("Agent mode"), { target: { value: "plan" } });
-    fireEvent.change(provider, { target: { value: "claude" } });
+    await chooseProvider("Claude");
 
-    const mode = screen.getByLabelText("Agent mode") as HTMLSelectElement;
-    expect(provider.value).toBe("claude");
-    expect(mode.value).toBe("review");
-    // The new provider's modes replace the old provider's options.
-    expect(Array.from(mode.options).map((option) => option.value)).toEqual(["default", "review"]);
+    expect(selectedProviderInstance()).toBe("claude_code_default");
+    expect(screen.queryByLabelText("Interaction mode")).toBeNull();
+    await waitFor(() => expect(useDraftChat.getState().draftFor("matrix-os")).toMatchObject({
+      providerId: "claude",
+      mode: "review",
+    }));
   });
 
   it("updates the sandbox when switching from pi to a non-pi provider", async () => {
     const { invoke } = mockOperator({ summary: piFirstSummaryFixture() });
     await openDraftComposer();
 
-    const provider = (await screen.findByLabelText("Agent provider")) as HTMLSelectElement;
-    expect(provider.value).toBe("pi");
-    fireEvent.change(provider, { target: { value: "codex" } });
-    const composer = screen.getByLabelText("Message new chat") as HTMLTextAreaElement;
-    fireEvent.change(composer, { target: { value: "Switch providers safely" } });
+    await screen.findByRole("button", { name: "Choose model and provider" });
+    expect(selectedProviderInstance()).toBe("pi_default");
+    await chooseProvider("Codex");
+    const composer = screen.getByLabelText("Message new chat");
+    await setSharedComposerText(composer, "Switch providers safely");
     fireEvent.keyDown(composer, { key: "Enter" });
 
     await waitFor(() => {
@@ -441,20 +508,20 @@ describe("composer provider/mode pickers", () => {
     });
   });
 
-  it("sends the picked provider and mode with the created thread", async () => {
+  it("sends the picked provider and its default mode with the created thread", async () => {
     const { invoke } = mockOperator();
     await openDraftComposer();
 
-    fireEvent.change(await screen.findByLabelText("Agent provider"), { target: { value: "claude" } });
-    fireEvent.change(screen.getByLabelText("Agent mode"), { target: { value: "default" } });
-    const composer = screen.getByLabelText("Message new chat") as HTMLTextAreaElement;
-    fireEvent.change(composer, { target: { value: "Use the picked provider" } });
+    await screen.findByRole("button", { name: "Choose model and provider" });
+    await chooseProvider("Claude");
+    const composer = screen.getByLabelText("Message new chat");
+    await setSharedComposerText(composer, "Use the picked provider");
     fireEvent.keyDown(composer, { key: "Enter" });
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
         "runtime:create-thread",
-        expect.objectContaining({ providerId: "claude", mode: "default", prompt: "Use the picked provider" }),
+        expect.objectContaining({ providerId: "claude", mode: "review", prompt: "Use the picked provider" }),
       );
     });
   });
@@ -464,16 +531,16 @@ describe("composer provider/mode pickers", () => {
     render(<ProjectChatsView projectId="matrix-os" active />);
     await screen.findByRole("region", { name: "Conversation Plan the auth work" });
 
-    const composer = (await screen.findByLabelText("Message conversation")) as HTMLTextAreaElement;
-    const provider = await screen.findByLabelText("Agent provider");
-    expect(provider.textContent).toBe("Codex");
-    // Turns cannot change provider or mode (CreateAgentTurnRequest carries only
-    // message/attachments/clientRequestId), so the picker is display-only and
-    // no mode picker is offered in a thread.
-    expect(provider.tagName).toBe("SPAN");
-    expect(screen.queryByRole("combobox", { name: "Agent provider" })).toBeNull();
+    const composer = await screen.findByLabelText("Message conversation");
+    const provider = await screen.findByRole("button", { name: "Choose model and provider" });
+    expect(provider.getAttribute("data-provider-instance")).toBe("codex_default");
     expect(provider.closest(".prompt-card")).not.toBeNull();
-    expect(screen.queryByLabelText("Agent mode")).toBeNull();
+    fireEvent.click(provider);
+    expect(screen.getByText("Provider Instance is locked after the first Turn.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Claude Code harness, Available" }).getAttribute("aria-disabled"))
+      .toBe("true");
+    expect(screen.queryByLabelText("Interaction mode")).toBeNull();
+    expect(screen.getByRole("button", { name: "Reasoning" })).toBeTruthy();
     expect(composer).toBeTruthy();
   });
 
@@ -482,10 +549,13 @@ describe("composer provider/mode pickers", () => {
     render(<ProjectChatsView projectId="matrix-os" active />);
     await screen.findByRole("region", { name: "Conversation Plan the auth work" });
 
-    const provider = await screen.findByLabelText("Agent provider");
+    const provider = await screen.findByRole("button", { name: "Choose model and provider" });
     expect(provider.textContent).toBe("removed-provider (unavailable)");
-    expect(provider.tagName).toBe("SPAN");
-    expect(screen.queryByRole("combobox", { name: "Agent provider" })).toBeNull();
-    expect(screen.queryByLabelText("Agent mode")).toBeNull();
+    expect(provider.getAttribute("data-provider-instance")).toBe("");
+    fireEvent.click(provider);
+    expect(screen.getByRole("button", { name: "Codex harness, Available" }).getAttribute("aria-disabled"))
+      .toBe("true");
+    expect(screen.getByRole("button", { name: "Claude Code harness, Available" }).getAttribute("aria-disabled"))
+      .toBe("true");
   });
 });

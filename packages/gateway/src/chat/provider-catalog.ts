@@ -14,6 +14,7 @@ import {
   type CanonicalProviderDriverKind,
   type CanonicalProviderInstanceDescriptor,
   type CanonicalProviderOptionDescriptor,
+  type CanonicalChatSkillDescriptor,
   type CanonicalProviderSetupAction,
   type CanonicalProviderSupport,
 } from "@matrix-os/contracts";
@@ -24,10 +25,18 @@ import type { RequestPrincipal } from "../request-principal.js";
 
 const ADAPTER_VERSION = "1.0.0";
 const SYSTEM_DRIVERS = ["hermes", "openclaw"] as const;
-const MAX_CODING_DRIVERS = 4;
+const CODING_DRIVERS = ["codex", "claude_code", "opencode", "pi"] as const;
 const MAX_EFFORTS = 4;
+const MAX_SKILLS = 64;
 
 type InstanceDraft = Omit<CanonicalProviderInstanceDescriptor, "catalogRevision">;
+type CodingDriverKind = typeof CODING_DRIVERS[number];
+
+export interface CodingModelCatalogProjection {
+  models: Array<Omit<CanonicalModelDescriptor, "availability">>;
+  options: CanonicalProviderOptionDescriptor[];
+  defaultModel: string;
+}
 
 export interface ChatProviderCatalogService {
   getCatalog(principal: RequestPrincipal): Promise<CanonicalProviderCatalog>;
@@ -48,7 +57,7 @@ function driverDisplayName(kind: CanonicalProviderDriverKind): string {
   return kind.charAt(0).toUpperCase() + kind.slice(1);
 }
 
-function codingDriverKind(provider: AgentProviderSummary): CanonicalProviderDriverKind | null {
+function codingDriverKind(provider: AgentProviderSummary): CodingDriverKind | null {
   if (provider.kind === "claude" || provider.id === "claude") return "claude_code";
   if (provider.kind === "codex" || provider.id === "codex") return "codex";
   if (provider.kind === "opencode" || provider.id === "opencode") return "opencode";
@@ -65,8 +74,10 @@ function canonicalAvailability(
   return "unavailable";
 }
 
-function codingSupports(provider: AgentProviderSummary): CanonicalProviderSupport {
-  const driverKind = codingDriverKind(provider);
+function codingSupports(
+  driverKind: CodingDriverKind,
+  supportedModes: string[],
+): CanonicalProviderSupport {
   const isCodex = driverKind === "codex";
   return {
     rootChat: true,
@@ -80,7 +91,7 @@ function codingSupports(provider: AgentProviderSummary): CanonicalProviderSuppor
     userInput: isCodex,
     worktrees: "optional",
     resources: ["file", "folder", "project", "task", "app", "terminal_session"],
-    interactionModes: provider.supportedModes,
+    interactionModes: supportedModes,
     permissionModes: ["supervised", "auto_accept_edits", "auto", "full_access"],
   };
 }
@@ -97,7 +108,7 @@ function codingModels(provider: AgentProviderSummary): CanonicalModelDescriptor[
       : "unavailable" as const;
   return [{
     id,
-    displayName: parsedModel?.success === true ? parsedModel.data : "Provider default",
+    displayName: parsedModel?.success === true ? parsedModel.data : `${provider.displayName} default`,
     availability,
     capabilities: ["reasoning", "tools"],
     supportsVision: false,
@@ -105,12 +116,38 @@ function codingModels(provider: AgentProviderSummary): CanonicalModelDescriptor[
   }];
 }
 
-function codingInstance(provider: AgentProviderSummary): InstanceDraft | null {
+function codingOptions(provider: AgentProviderSummary): CanonicalProviderOptionDescriptor[] {
+  if (codingDriverKind(provider) !== "codex") return [];
+  return [{
+    id: "effort",
+    label: "Reasoning",
+    kind: "enum",
+    values: ["low", "medium", "high", "xhigh", "max", "ultra"].map((value) => ({
+      value,
+      label: value === "xhigh" ? "Extra high" : value.charAt(0).toUpperCase() + value.slice(1),
+    })),
+    defaultValue: "low",
+    placement: "composer",
+  }];
+}
+
+function codingInstance(
+  provider: AgentProviderSummary,
+  skills: CanonicalChatSkillDescriptor[],
+  projectedCatalog?: CodingModelCatalogProjection | null,
+): InstanceDraft | null {
   const driverKind = codingDriverKind(provider);
   if (driverKind === null) return null;
   const id = `${driverKind}_default`;
   const availability = canonicalAvailability(provider.availability);
-  const models = codingModels(provider);
+  const modelAvailability = provider.availability === "available"
+    ? "available" as const
+    : provider.availability === "auth_required"
+      ? "auth_required" as const
+      : "unavailable" as const;
+  const models = projectedCatalog?.models.map((model) => ({ ...model, availability: modelAvailability }))
+    ?? codingModels(provider);
+  const defaultModel = projectedCatalog?.defaultModel;
   return {
     id,
     driverKind,
@@ -118,14 +155,36 @@ function codingInstance(provider: AgentProviderSummary): InstanceDraft | null {
     availability,
     workspaceRequirement: "project_optional",
     models,
-    options: [],
-    skills: [],
+    options: projectedCatalog?.options ?? codingOptions(provider),
+    skills,
     commands: [],
     setupActions: provider.setupActions,
-    supports: codingSupports(provider),
-    ...(availability === "available" ? {
-      defaultSelection: { instanceId: id, model: models[0]!.id },
+    supports: codingSupports(driverKind, provider.supportedModes),
+    ...(availability === "available" && models.length > 0 ? {
+      defaultSelection: {
+        instanceId: id,
+        model: models.some((model) => model.id === defaultModel) ? defaultModel! : models[0]!.id,
+      },
     } : {}),
+  };
+}
+
+function unavailableCodingInstance(
+  driverKind: CodingDriverKind,
+  skills: CanonicalChatSkillDescriptor[],
+): InstanceDraft {
+  return {
+    id: `${driverKind}_default`,
+    driverKind,
+    displayName: driverDisplayName(driverKind),
+    availability: "unavailable",
+    workspaceRequirement: "project_optional",
+    models: [],
+    options: [],
+    skills,
+    commands: [],
+    setupActions: [],
+    supports: codingSupports(driverKind, []),
   };
 }
 
@@ -141,7 +200,7 @@ function systemSupports(): CanonicalProviderSupport {
     worktrees: "none",
     resources: ["file", "folder", "project", "task", "app", "terminal_session"],
     interactionModes: ["default"],
-    permissionModes: ["supervised"],
+    permissionModes: ["supervised", "auto_accept_edits", "auto", "full_access"],
   };
 }
 
@@ -194,7 +253,6 @@ function systemOptions(
 }
 
 function systemSetupActions(runtime: AgentRuntimeDescriptor | undefined): CanonicalProviderSetupAction[] {
-  if (runtime?.selectionState === "active" && runtime.setupAction === undefined) return [];
   return [{
     id: `${runtime?.id ?? "runtime"}_settings`,
     kind: "open_settings",
@@ -205,10 +263,12 @@ function systemSetupActions(runtime: AgentRuntimeDescriptor | undefined): Canoni
 function systemAvailability(
   runtime: AgentRuntimeDescriptor | undefined,
   models: CanonicalModelDescriptor[],
+  messagingConfigured: boolean,
 ): CanonicalProviderInstanceDescriptor["availability"] {
   if (runtime === undefined) return "unavailable";
   if (runtime.installState === "missing" || runtime.installState === "installing") return "setup_required";
   if (runtime.selectionState !== "active") return "unavailable";
+  if (!messagingConfigured) return "auth_required";
   if (models.some((model) => model.availability === "available")) return "available";
   if (!runtime.configured || models.some((model) => model.availability === "auth_required")) {
     return "auth_required";
@@ -222,10 +282,19 @@ function systemInstance(input: {
   providers: AgentProviderDescriptor[];
   selectedProvider: string | null;
   selectedModel: string | null;
+  messagingConfigured: boolean;
+  skills: CanonicalChatSkillDescriptor[];
 }): InstanceDraft {
   const id = `${input.kind}_default`;
-  const models = systemModels(input.kind, input.providers);
-  const availability = systemAvailability(input.runtime, models);
+  const harnessConfigured = input.messagingConfigured
+    && input.selectedProvider !== null
+    && input.selectedModel !== null;
+  const models = systemModels(input.kind, input.providers).map((model) => (
+    harnessConfigured || model.availability === "unavailable"
+      ? model
+      : { ...model, availability: "auth_required" as const }
+  ));
+  const availability = systemAvailability(input.runtime, models, harnessConfigured);
   const selectedModel = input.selectedProvider && input.selectedModel
     ? `${input.selectedProvider}:${input.selectedModel}`
     : null;
@@ -239,7 +308,7 @@ function systemInstance(input: {
     workspaceRequirement: "none",
     models,
     options: systemOptions(input.kind, input.providers),
-    skills: [],
+    skills: input.skills,
     commands: [],
     setupActions: systemSetupActions(input.runtime),
     supports: systemSupports(),
@@ -261,6 +330,11 @@ export function createChatProviderCatalogService(options: {
   codingProviders: Pick<CodingAgentProviderRegistry, "listProviders">;
   agentRuntimeSource: AgentRuntimeSource;
   runtimeTimeoutMs?: number;
+  skillsSource?: () => Array<{ name: string; description: string }>;
+  codingModelCatalogSource?: (
+    provider: AgentProviderSummary,
+    principal: RequestPrincipal,
+  ) => Promise<CodingModelCatalogProjection | null>;
 }): ChatProviderCatalogService {
   return {
     async getCatalog(principal) {
@@ -276,13 +350,30 @@ export function createChatProviderCatalogService(options: {
       }
 
       const coding = codingResult.status === "fulfilled" ? codingResult.value : [];
+      const skills = (options.skillsSource?.() ?? []).flatMap((skill) => {
+        const id = skill.name.trim().toLocaleLowerCase();
+        if (!/^[a-z][a-z0-9_-]{0,79}$/.test(id)) return [];
+        return [{
+          id,
+          displayName: skill.name,
+          description: skill.description,
+          invocation: `/${id}`,
+        } satisfies CanonicalChatSkillDescriptor];
+      }).slice(0, MAX_SKILLS);
       const seenCodingDrivers: CanonicalProviderDriverKind[] = [];
       const codingInstances: InstanceDraft[] = [];
       for (const provider of coding) {
-        const instance = codingInstance(provider);
+        let projectedCatalog: CodingModelCatalogProjection | null = null;
+        if (options.codingModelCatalogSource) {
+          try {
+            projectedCatalog = await options.codingModelCatalogSource(provider, principal);
+          } catch (_error) {
+            console.warn("[chat-providers] Coding model catalog unavailable");
+          }
+        }
+        const instance = codingInstance(provider, skills, projectedCatalog);
         if (instance === null) continue;
-        if (seenCodingDrivers.includes(instance.driverKind)
-          || seenCodingDrivers.length === MAX_CODING_DRIVERS) {
+        if (seenCodingDrivers.includes(instance.driverKind)) {
           throw new ProviderCatalogUnavailableError(false);
         }
         seenCodingDrivers.push(instance.driverKind);
@@ -296,9 +387,16 @@ export function createChatProviderCatalogService(options: {
         providers: snapshot?.providers ?? [],
         selectedProvider: snapshot?.messaging.runtime === kind ? snapshot.messaging.provider : null,
         selectedModel: snapshot?.messaging.runtime === kind ? snapshot.messaging.model : null,
+        messagingConfigured: snapshot?.messaging.runtime === kind
+          && snapshot.messaging.configured,
+        skills,
       }));
-      const instances = [...systemInstances, ...codingInstances];
-      const driverKinds = [...SYSTEM_DRIVERS, ...seenCodingDrivers];
+      const completeCodingInstances = CODING_DRIVERS.map((kind) =>
+        codingInstances.find((instance) => instance.driverKind === kind)
+          ?? unavailableCodingInstance(kind, skills)
+      );
+      const instances = [...systemInstances, ...completeCodingInstances];
+      const driverKinds = [...SYSTEM_DRIVERS, ...CODING_DRIVERS];
       const drivers = driverKinds.map((kind) => ({
         kind,
         displayName: driverDisplayName(kind),

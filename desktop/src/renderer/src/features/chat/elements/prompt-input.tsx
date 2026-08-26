@@ -1,5 +1,5 @@
 import { ArrowUp, CircleStop } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 
 // AI-Elements-style PromptInput: a card with a growing textarea and a
 // submit/stop control. Decorative action buttons were removed — every
@@ -19,8 +19,10 @@ export function PromptInput({
   controls,
   trailingControls,
   attachments,
+  editor,
   canSubmit,
   focusRequestId,
+  onTextareaKeyDown,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -34,6 +36,7 @@ export function PromptInput({
   ariaLabel?: string;
   footer?: ReactNode;
   attachments?: ReactNode;
+  editor?: ReactNode;
   canSubmit?: boolean;
   // Left side of the bottom row: compact pickers (provider, mode) rendered
   // Codex-style next to the send/stop control. Purely presentational slot.
@@ -42,6 +45,7 @@ export function PromptInput({
   trailingControls?: ReactNode;
   // Bumping this id focuses the textarea (type-to-start, ⌘J, chip seeds).
   focusRequestId?: number;
+  onTextareaKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean | void;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const submissionReady = canSubmit ?? value.trim().length > 0;
@@ -63,29 +67,38 @@ export function PromptInput({
 
   return (
     <div
-      className="prompt-card flex flex-col overflow-hidden rounded-[var(--radius-xl)] border"
+      className="prompt-card flex flex-col rounded-[var(--radius-xl)] border"
       style={{ background: "var(--bg-surface)" }}
     >
       {attachments}
-      <textarea
-        ref={ref}
-        autoFocus={autoFocus}
-        disabled={disabled}
-        maxLength={maxLength}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        aria-label={ariaLabel ?? placeholder}
-        rows={1}
-        className="w-full resize-none bg-transparent px-4 pt-3.5 text-md outline-none disabled:opacity-60"
-        style={{ color: "var(--text-primary)", maxHeight: 220 }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            if (submitEnabled) onSubmit();
-          }
-        }}
-      />
+      {editor ?? (
+        <div className="px-4 pt-3.5">
+          <textarea
+            ref={ref}
+            autoFocus={autoFocus}
+            disabled={disabled}
+            maxLength={maxLength}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder}
+            aria-label={ariaLabel ?? placeholder}
+            rows={1}
+            className="w-full resize-none bg-transparent p-0 text-md outline-none disabled:opacity-60"
+            style={{
+              color: "var(--text-primary)",
+              maxHeight: 220,
+              maxWidth: "100%",
+            }}
+            onKeyDown={(e) => {
+              if (onTextareaKeyDown?.(e)) return;
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                if (submitEnabled) onSubmit();
+              }
+            }}
+          />
+        </div>
+      )}
       <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5">
         <div className="flex min-w-0 flex-1 items-center gap-1">
           {controls}

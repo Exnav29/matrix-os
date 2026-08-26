@@ -69,12 +69,14 @@ export function formatRelativeTime(iso: string, nowMs: number): string {
  * threads are newer than the bounded workspace pages). Summary threads missing
  * from the workspace are appended so actionable chats never disappear; without
  * a workspace (capability off or load failed) the summary projection alone
- * backs the list.
+ * backs the list. Locally confirmed creates are also overlaid because the
+ * bounded server projections may briefly lag the successful create response.
  */
 export function buildProjectThreadListModel(
   workspace: ProjectAgentWorkspace | null,
   summary: RuntimeSummary,
   projectId: string,
+  createdThreadHandles: AgentThreadSummary[] = [],
 ): ProjectThreadListModel {
   const grouped = workspace ? groupProjectWorkspaceThreads(workspace) : null;
   const projectThreads = grouped ? [...grouped.projectThreads] : [];
@@ -86,7 +88,25 @@ export function buildProjectThreadListModel(
     : [];
   const otherThreads = grouped ? [...grouped.unlistedTaskThreads] : [];
 
+  const authoritativeWorkspaceIds = new Set([
+    ...projectThreads,
+    ...taskGroups.flatMap((group) => group.threads),
+    ...otherThreads,
+  ].map((thread) => thread.id));
+  const liveThreads = [...summary.activeThreads.items, ...summary.attentionThreads.items];
+  const liveThreadIds = new Set(liveThreads.map((thread) => thread.id));
   const overlay = new Map<string, AgentThreadSummary>();
+  for (const thread of createdThreadHandles) {
+    const workspaceIsNewer = workspace
+      ? Date.parse(workspace.updatedAt) >= Date.parse(thread.updatedAt)
+      : false;
+    if (
+      thread.projectId === projectId
+      && !authoritativeWorkspaceIds.has(thread.id)
+      && !liveThreadIds.has(thread.id)
+      && !workspaceIsNewer
+    ) overlay.set(thread.id, thread);
+  }
   for (const thread of summary.activeThreads.items) {
     if (thread.projectId === projectId) overlay.set(thread.id, thread);
   }

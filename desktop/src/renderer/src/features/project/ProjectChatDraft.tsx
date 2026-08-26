@@ -1,3 +1,4 @@
+import { FolderOpen } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -8,16 +9,36 @@ import {
   type RuntimeSummary,
 } from "@matrix-os/contracts";
 import { useCodingAgentWorkspace } from "../../stores/coding-agent-workspace";
+import { useConnection } from "../../stores/connection";
 import { useDraftChat } from "../../stores/draft-chat";
 import { useProjectWorkspaces } from "../../stores/project-workspaces";
 import { useProviderPreferences } from "../settings/provider-preferences";
-import { PromptInput } from "../chat/elements/prompt-input";
 import { AttachmentPreviewRow } from "../chat/attachments/AttachmentPreviewRow";
 import { useConversationAttachments } from "../chat/attachments/use-conversation-attachments";
-import { AgentComposerPickers } from "../coding-agents/composer-pickers";
+import {
+  SharedChatComposer,
+  supportsNativeFileAttachments,
+  type ComposerReferenceToken,
+  type SharedChatComposerSubmission,
+} from "../chat/SharedChatComposer";
+import { SharedChatSurface } from "../chat/SharedChatSurface";
+import { searchProjectChatResources } from "../chat/chat-resource-search";
+import {
+  applyCanonicalSelectionToAgentDraft,
+  createLegacyProjectProviderCatalog,
+  filterCatalogForLegacyProject,
+  instanceIdForLegacyProvider,
+  legacyProjectSelectionExecutable,
+  permissionModeForAgentDraft,
+} from "../chat/canonical-composer-adapter";
+import {
+  applyCanonicalComposerPreference,
+  createCanonicalComposerSelection,
+  type CanonicalComposerSelection,
+} from "../chat/canonical-composer-state";
+import { useChatProviderCatalog } from "../chat/chat-provider-catalog";
+import { useProviderSetup } from "../chat/use-provider-setup";
 import { capabilityEnabled } from "../coding-agents/capabilities";
-import { ProviderReadinessNotice } from "../coding-agents/ProviderReadinessNotice";
-import { deriveProviderReadiness } from "../coding-agents/provider-readiness";
 import { isTypeToStartInteractiveTarget } from "../coding-agents/type-to-start";
 import {
   clearComposerLaunchContext,
@@ -57,6 +78,9 @@ export function ProjectChatDraft({
   presentation?: "hero" | "landing";
 }) {
   const preferredProviderId = useProviderPreferences((s) => s.defaultProviderId);
+  const composerSelections = useProviderPreferences((s) => s.composerSelections);
+  const setComposerSelectionPreference = useProviderPreferences((s) => s.setComposerSelection);
+  const api = useConnection((state) => state.api);
   const initialDraft = useMemo(() => {
     const base = defaultAgentThreadComposerDraft(summary);
     const preferred = preferredProviderId
@@ -82,6 +106,7 @@ export function ProjectChatDraft({
   });
   const providerSelectionTouchedRef = useRef(restoredEntry?.pickerTouched ?? false);
   const attachments = useConversationAttachments();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const store = useDraftChat.getState();
@@ -104,11 +129,11 @@ export function ProjectChatDraft({
   const createStatus = useCodingAgentWorkspace((s) => s.createStatus);
   const createError = useCodingAgentWorkspace((s) => s.createError);
   const createThread = useCodingAgentWorkspace((s) => s.createThread);
-  const workspaceStatus = useCodingAgentWorkspace((s) => s.status);
   const refreshSummary = useCodingAgentWorkspace((s) => s.refresh);
   const resolveNewChatTarget = useProjectWorkspaces((s) => s.resolveNewChatTarget);
   const canCreate = capabilityEnabled(summary, "codingAgentsThreadCreate");
   const submitting = createStatus === "submitting";
+  const [referenceTokens, setReferenceTokens] = useState<ComposerReferenceToken[]>([]);
   const [resolvingTarget, setResolvingTarget] = useState(false);
   const submitInFlightRef = useRef(false);
   const busy = submitting || resolvingTarget;
@@ -129,13 +154,94 @@ export function ProjectChatDraft({
         mode: initialDraft.mode,
         sandboxMode: initialDraft.sandboxMode,
       };
-  const selectedProvider = summary.providers.find((provider) => provider.id === effectiveDraft.providerId)
-    ?? summary.providers[0];
-  const readiness = deriveProviderReadiness({
+  const fallbackCatalog = useMemo(
+    () => createLegacyProjectProviderCatalog(summary),
+    [summary],
+  );
+  const loadedCatalog = useChatProviderCatalog(fallbackCatalog).catalog;
+  const projectCatalog = useMemo(
+    () => filterCatalogForLegacyProject(loadedCatalog, summary),
+    [loadedCatalog, summary],
+  );
+  const preferredInstanceId = instanceIdForLegacyProvider(
+    projectCatalog,
     summary,
-    providerId: effectiveDraft.providerId ?? selectedProvider?.id,
-    loading: workspaceStatus === "loading",
-  });
+    effectiveDraft.providerId,
+  );
+  const [canonicalSelection, setCanonicalSelection] = useState<CanonicalComposerSelection | null>(
+    () => {
+      let selection = createCanonicalComposerSelection(fallbackCatalog, instanceIdForLegacyProvider(
+        fallbackCatalog,
+        summary,
+        restoredDraft?.providerId ?? initialDraft.providerId,
+      ));
+      if (selection) {
+        selection = applyCanonicalComposerPreference(
+          fallbackCatalog,
+          selection,
+          useProviderPreferences.getState().composerSelections[selection.instanceId],
+        );
+      }
+      if (selection && restoredDraft?.mode && fallbackCatalog.instances
+        .find((instance) => instance.id === selection.instanceId)
+        ?.supports.interactionModes.includes(restoredDraft.mode)) {
+        selection.interactionMode = restoredDraft.mode;
+      }
+      const restoredPermissionMode = permissionModeForAgentDraft(restoredDraft ?? initialDraft);
+      if (selection && fallbackCatalog.instances
+        .find((instance) => instance.id === selection.instanceId)
+        ?.supports.permissionModes.includes(restoredPermissionMode)) {
+        selection.permissionMode = restoredPermissionMode;
+      }
+      return selection;
+    },
+  );
+
+  useEffect(() => {
+    setCanonicalSelection((current) => {
+      const currentStillValid = current
+        && projectCatalog.instances.some((instance) => (
+          instance.id === current.instanceId
+          && instance.models.some((model) => model.id === current.model && model.availability === "available")
+        ));
+      if (providerSelectionTouchedRef.current && currentStillValid) return current;
+      const created = createCanonicalComposerSelection(projectCatalog, preferredInstanceId);
+      if (!created) return null;
+      let next = created;
+      if (effectiveDraft.mode && projectCatalog.instances
+        .find((instance) => instance.id === next.instanceId)
+        ?.supports.interactionModes.includes(effectiveDraft.mode)) {
+        next.interactionMode = effectiveDraft.mode;
+      }
+      const restoredPermissionMode = permissionModeForAgentDraft(effectiveDraft);
+      if (projectCatalog.instances
+        .find((instance) => instance.id === next.instanceId)
+        ?.supports.permissionModes.includes(restoredPermissionMode)) {
+        next.permissionMode = restoredPermissionMode;
+      }
+      next = applyCanonicalComposerPreference(
+        projectCatalog,
+        next,
+        composerSelections[next.instanceId],
+      );
+      return current
+        && current.instanceId === next.instanceId
+        && current.model === next.model
+        && current.interactionMode === next.interactionMode
+        && current.permissionMode === next.permissionMode
+        ? current
+        : next;
+    });
+  }, [composerSelections, effectiveDraft.mode, preferredInstanceId, projectCatalog]);
+  const selectedInstance = projectCatalog.instances.find((instance) => (
+    instance.id === canonicalSelection?.instanceId
+  ));
+  const canonicalBlocked = !legacyProjectSelectionExecutable(
+    projectCatalog,
+    summary,
+    canonicalSelection,
+  );
+  const handleProviderSetup = useProviderSetup(summary.providers, refreshSummary);
 
   useEffect(() => {
     void useProviderPreferences.getState().hydrate();
@@ -158,10 +264,21 @@ export function ProjectChatDraft({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [active, typeToStartEnabled, canCreate]);
 
-  async function submit() {
-    if (readiness.blocked || submitting || submitInFlightRef.current) return;
-    let effective = effectiveDraft;
-    if (!effective.prompt.trim() && attachments.items.length === 0) return;
+  async function submit(submission: SharedChatComposerSubmission) {
+    if (canonicalBlocked || submitting || submitInFlightRef.current) return;
+    const selectedInstance = projectCatalog.instances.find((instance) => (
+      instance.id === canonicalSelection?.instanceId
+    ));
+    if (attachments.items.length > 0 && !supportsNativeFileAttachments(selectedInstance)) return;
+    let effective = canonicalSelection
+      ? applyCanonicalSelectionToAgentDraft(
+          summary,
+          projectCatalog,
+          { ...effectiveDraft, prompt: submission.agentPrompt },
+          canonicalSelection,
+        )
+      : { ...effectiveDraft, prompt: submission.agentPrompt };
+    if (!effective.prompt.trim() && attachments.items.length === 0 && referenceTokens.length === 0) return;
     submitInFlightRef.current = true;
     setResolvingTarget(true);
     try {
@@ -176,7 +293,7 @@ export function ProjectChatDraft({
           return;
         }
         effective = { ...effective, ...relation };
-        setDraft(effective);
+        setDraft({ ...effective, prompt: effectiveDraft.prompt });
       }
       const uploaded = await attachments.uploadAll();
       if (!uploaded.ok) return;
@@ -195,6 +312,7 @@ export function ProjectChatDraft({
       providerSelectionTouchedRef.current = false;
       useDraftChat.getState().clearDraft(projectId);
       setDraft(initialDraft);
+      setReferenceTokens([]);
       attachments.clear();
       onCreated(threadId, prompt.replace(/\s+/g, " ").slice(0, 80) || "Agent conversation");
     } finally {
@@ -203,12 +321,15 @@ export function ProjectChatDraft({
     }
   }
 
-  const promptEmpty = effectiveDraft.prompt.trim().length === 0 && attachments.items.length === 0;
+  const promptEmpty = effectiveDraft.prompt.trim().length === 0
+    && attachments.items.length === 0
+    && referenceTokens.length === 0;
 
   return (
-    <section
-      aria-label={`New chat in ${projectLabel}`}
-      className={`ph-no-capture flex min-w-0 flex-col overflow-hidden ${presentation === "landing" ? "shrink-0" : "min-h-[460px] flex-1"}`}
+    <SharedChatSurface
+      ariaLabel={`New chat in ${projectLabel}`}
+      project={{ projectId, label: projectLabel }}
+      className={`ph-no-capture flex min-w-0 flex-col overflow-visible ${presentation === "landing" ? "shrink-0" : "min-h-[460px] flex-1"}`}
       style={{ background: "var(--bg-app)" }}
       data-slot="project-chat-draft"
       {...attachments.paneProps}
@@ -231,54 +352,71 @@ export function ProjectChatDraft({
           ) : null}
           {canCreate ? (
             <>
-              <div className="mb-2">
-                <ProviderReadinessNotice
-                  readiness={readiness}
-                  providers={summary.providers}
-                  onRefresh={refreshSummary}
-                />
-              </div>
-              <PromptInput
-                value={effectiveDraft.prompt}
-                onChange={(prompt) => setDraft((current) => ({ ...current, prompt }))}
-                onSubmit={() => void submit()}
-                busy={busy}
-                disabled={busy}
-                canSubmit={!busy && !readiness.blocked && (effectiveDraft.prompt.trim().length > 0 || attachments.items.length > 0)}
-                attachments={(
-                  <AttachmentPreviewRow
-                    items={attachments.items}
-                    disabled={busy}
-                    onRemove={attachments.remove}
-                    onRetry={(localId) => void attachments.retry(localId)}
-                  />
-                )}
-                autoFocus={active}
-                focusRequestId={active ? focusRequestId + localFocusBumps : 0}
-                maxLength={24_000}
-                ariaLabel="Message new chat"
-                placeholder={presentation === "landing" ? "How can I help you today?" : "Ask the agent to do anything…"}
-                controls={(
-                  <AgentComposerPickers
-                    summary={summary}
-                    providerId={selectedProvider?.id}
-                    mode={effectiveDraft.mode ?? selectedProvider?.defaultMode}
-                    onProviderChange={(providerId) => {
-                      providerSelectionTouchedRef.current = true;
-                      const provider = summary.providers.find((candidate) => candidate.id === providerId);
-                      setDraft((current) => ({
-                        ...current,
-                        providerId: provider?.id,
-                        mode: provider?.defaultMode ?? current.mode,
-                        sandboxMode: defaultSandboxModeForProvider(provider),
-                      }));
-                    }}
-                    onModeChange={(mode) => {
-                      providerSelectionTouchedRef.current = true;
-                      setDraft((current) => ({ ...current, mode }));
-                    }}
-                  />
-                )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                aria-label="Choose files"
+                className="sr-only"
+                onChange={(event) => {
+                  attachments.add(Array.from(event.currentTarget.files ?? []));
+                  event.currentTarget.value = "";
+                }}
+              />
+              <SharedChatComposer
+                  value={effectiveDraft.prompt}
+                  onChange={(prompt) => setDraft((current) => ({ ...current, prompt }))}
+                  referenceTokens={referenceTokens}
+                  onReferenceTokensChange={setReferenceTokens}
+                  onSubmit={(submission) => void submit(submission)}
+                  busy={busy}
+                  disabled={busy}
+                  canSubmit={!busy && !canonicalBlocked && (
+                    effectiveDraft.prompt.trim().length > 0
+                    || attachments.items.length > 0
+                    || referenceTokens.length > 0
+                  )}
+                  catalog={projectCatalog}
+                  selection={canonicalSelection}
+                  onSelectionChange={(selection) => {
+                    providerSelectionTouchedRef.current = true;
+                    setComposerSelectionPreference(selection);
+                    setCanonicalSelection(selection);
+                    const nextDraft = applyCanonicalSelectionToAgentDraft(
+                      summary,
+                      projectCatalog,
+                      effectiveDraft,
+                      selection,
+                    );
+                    setDraft(nextDraft);
+                  }}
+                  onProviderSetup={(instance, action) => void handleProviderSetup(instance, action)}
+                  instanceLocked={false}
+                  menuSide="bottom"
+                  resources={[{ kind: "project", id: projectId, label: projectLabel }]}
+                  resourceSearch={(query) => api
+                    ? searchProjectChatResources(api, projectId, query)
+                    : Promise.resolve([])}
+                  onAttach={() => fileInputRef.current?.click()}
+                  attachments={(
+                    <AttachmentPreviewRow
+                      items={attachments.items}
+                      disabled={busy}
+                      onRemove={attachments.remove}
+                      onRetry={(localId) => void attachments.retry(localId)}
+                    />
+                  )}
+                  autoFocus={active}
+                  focusRequestId={active ? focusRequestId + localFocusBumps : 0}
+                  maxLength={24_000}
+                  ariaLabel="Message new chat"
+                  placeholder={presentation === "landing" ? "How can I help you today?" : "Ask the agent to do anything…"}
+                  leadingControls={(
+                    <span className="flex h-8 min-w-0 items-center gap-1.5 rounded-lg px-2 text-sm" style={{ color: "var(--text-secondary)" }}>
+                      <FolderOpen size={14} aria-hidden />
+                      <span className="max-w-40 truncate">{projectLabel}</span>
+                    </span>
+                  )}
               />
             </>
           ) : (
@@ -291,6 +429,6 @@ export function ProjectChatDraft({
           )}
         </div>
       </div>
-    </section>
+    </SharedChatSurface>
   );
 }
