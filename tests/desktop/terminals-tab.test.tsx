@@ -10,7 +10,7 @@ import { useConnection } from "../../desktop/src/renderer/src/stores/connection"
 import { useSessions } from "../../desktop/src/renderer/src/stores/sessions";
 import { useShellSessions } from "../../desktop/src/renderer/src/stores/shell-sessions";
 import { useTabs } from "../../desktop/src/renderer/src/stores/tabs";
-import { useTerminalAppearance } from "../../desktop/src/renderer/src/stores/terminal-appearance";
+import { useAppearance } from "../../desktop/src/renderer/src/stores/appearance";
 
 const terminalMounts = vi.hoisted(() => new Map<string, number>());
 
@@ -18,12 +18,11 @@ vi.mock("../../desktop/src/renderer/src/features/terminal/TerminalView", () => (
   default: ({
     sessionName,
     active,
-    themeMode,
   }: {
     sessionName: string;
     active?: boolean;
-    themeMode?: "dark" | "light";
   }) => {
+    const themeMode = useAppearance((state) => state.mode);
     React.useEffect(() => {
       terminalMounts.set(sessionName, (terminalMounts.get(sessionName) ?? 0) + 1);
       return () => {
@@ -98,20 +97,42 @@ describe("TerminalsTab", () => {
       activeTabId: null,
       openTab: vi.fn(),
     });
-    useTerminalAppearance.setState({
-      ...useTerminalAppearance.getInitialState(),
+    useAppearance.setState({
+      ...useAppearance.getInitialState(),
       mode: "dark",
       hydrated: true,
-      load: vi.fn().mockResolvedValue(undefined),
-      setMode: vi.fn((mode: "dark" | "light") => {
-        useTerminalAppearance.setState({ mode });
-      }),
     }, true);
   });
 
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("shows only the empty session card when no terminal sessions exist", () => {
+    useShellSessions.setState({ sessions: [], loading: false, error: null });
+
+    renderTab();
+
+    expect(screen.getByText("No shell sessions yet")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Search terminal sessions" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New shell" })).toBeNull();
+    expect(document.querySelector("[data-terminal-overview] h1")).toBeNull();
+  });
+
+  it("opens the most recently active session instead of showing an unselected overview", async () => {
+    useShellSessions.setState({
+      sessions: [
+        { name: "older-shell", status: "active", updatedAt: "2026-08-26T08:00:00.000Z" },
+        { name: "latest-shell", status: "active", updatedAt: "2026-08-26T09:00:00.000Z" },
+      ],
+    });
+
+    renderTab();
+
+    await waitFor(() => expect(screen.getByTestId("terminal-view-latest-shell").getAttribute("data-active")).toBe("true"));
+    expect(screen.queryByTestId("terminal-view-older-shell")).toBeNull();
+    expect((screen.getByRole("button", { name: "Open latest-shell" }) as HTMLElement).getAttribute("aria-current")).toBe("true");
   });
 
   it("renders only canonical shell sessions while preserving active and background placement actions", () => {
@@ -151,26 +172,23 @@ describe("TerminalsTab", () => {
     expect(screen.queryByRole("navigation", { name: "Terminal breadcrumb" })).toBeNull();
   });
 
-  it("defaults the Terminal session to dark and switches only its local surface to light", () => {
+  it("uses the Figma session header without a theme switcher", () => {
     useShellSessions.setState({
-      sessions: [{ name: "matrix-main", status: "active", placement: "active" }],
+      sessions: [{ name: "matrix-main", status: "active", placement: "active", createdAt: "2026-08-26T09:41:00.000Z" }],
     });
 
     renderTab();
-    fireEvent.click(screen.getByRole("button", { name: "Open matrix-main" }));
 
-    expect(screen.getByRole("group", { name: "Terminal theme" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Use dark Terminal theme" }).getAttribute("aria-pressed"))
-      .toBe("true");
+    const header = screen.getByRole("banner");
+    expect(header.className).toContain("justify-between");
+    expect(screen.getByRole("heading", { name: "matrix-main" }).className).toContain("text-xs");
+    expect(screen.getByText(/Started at .*main computer/).className).toContain("text-xs");
+    const active = screen.getByText("Active");
+    expect(active.className).toContain("h-5");
+    expect((active as HTMLElement).style.background).toBe("var(--surface-success, #EEF7F2)");
+    expect(screen.queryByRole("group", { name: "Terminal theme" })).toBeNull();
     expect(screen.getByTestId("terminal-view-matrix-main").getAttribute("data-theme-mode"))
       .toBe("dark");
-
-    fireEvent.click(screen.getByRole("button", { name: "Use light Terminal theme" }));
-
-    expect(screen.getByRole("button", { name: "Use light Terminal theme" }).getAttribute("aria-pressed"))
-      .toBe("true");
-    expect(screen.getByTestId("terminal-view-matrix-main").getAttribute("data-theme-mode"))
-      .toBe("light");
   });
 
   it("leaves loading ownership to MissionControl and reconciles a manual retry", async () => {
