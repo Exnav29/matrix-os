@@ -131,6 +131,11 @@ describe("ChatRepository", () => {
       "chat_user_state",
       "chats",
     ]);
+    const activityIndex = await sql<{ indexname: string }>`
+      SELECT indexname FROM pg_indexes
+      WHERE schemaname = 'public' AND indexname = 'idx_chat_run_events_run_occurred'
+    `.execute(repository.kysely);
+    expect(activityIndex.rows).toEqual([{ indexname: "idx_chat_run_events_run_occurred" }]);
   });
 
   it("creates idempotently, isolates owners, and commits the outbox atomically", async () => {
@@ -254,7 +259,8 @@ describe("ChatRepository", () => {
       adapterState: { schemaVersion: 1, state: { session: "opaque" } },
     });
 
-    expect(repeated).toEqual(first);
+    expect(first.alreadyAccepted).toBe(false);
+    expect(repeated).toEqual({ ...first, alreadyAccepted: true });
     expect((await repository.get(owner, created.chat.id))?.chat).toMatchObject({ revision: 1, messageCount: 1 });
     expect((await repository.get(owner, created.chat.id))?.activeRun).toEqual({
       runId: acceptedRun.id,
@@ -276,6 +282,115 @@ describe("ChatRepository", () => {
       turn: secondTurn,
       run: run(created.chat.id, secondTurn, 2),
     })).rejects.toBeInstanceOf(ChatBusyError);
+  });
+
+  it("admits an idempotent retry as a new Run attempt without duplicating the Turn input", async () => {
+    const chatId = "chat_retry_attempt";
+    await repository.create(owner, {
+      id: chatId,
+      clientRequestId: "req_create_retry_attempt",
+      title: "Retry attempt",
+    });
+    const inputMessage = message(chatId);
+    const inputTurn = turn(chatId, inputMessage, "req_retry_turn");
+    const firstRun = run(chatId, inputTurn);
+    await repository.admitTurn(owner, {
+      chatId,
+      baseRevision: 0,
+      message: inputMessage,
+      turn: inputTurn,
+      run: firstRun,
+    });
+    await repository.finishRun(owner, {
+      chatId,
+      runId: firstRun.id,
+      outcome: "failed",
+      completedAt: now,
+    });
+    const beforeRetry = await repository.get(owner, chatId);
+    expect(beforeRetry).not.toBeNull();
+
+    const retryRun = run(chatId, inputTurn, 2);
+    const admitted = await repository.admitRetry(owner, {
+      chatId,
+      turnId: inputTurn.id,
+      clientRequestId: "req_retry_attempt_2",
+      baseRevision: beforeRetry!.chat.revision,
+      run: retryRun,
+      adapterState: { schemaVersion: 1, state: { sessionId: "native_retry" } },
+    });
+    expect(admitted).toMatchObject({
+      alreadyAccepted: false,
+      run: { id: retryRun.id, attempt: 2, status: "accepted" },
+      turn: { id: inputTurn.id, status: "accepted" },
+      chat: { chat: { messageCount: 1 } },
+    });
+
+    const duplicate = await repository.admitRetry(owner, {
+      chatId,
+      turnId: inputTurn.id,
+      clientRequestId: "req_retry_attempt_2",
+      baseRevision: beforeRetry!.chat.revision,
+      run: { ...retryRun, id: "run_retry_duplicate" },
+    });
+    expect(duplicate).toMatchObject({
+      alreadyAccepted: true,
+      run: { id: retryRun.id, attempt: 2 },
+    });
+    expect((await repository.exportChat(owner, chatId))?.messages).toHaveLength(1);
+    expect(await repository.getAdapterState(owner, {
+      runId: retryRun.id,
+      driverKind: retryRun.driverKind,
+      instanceId: retryRun.instanceId,
+    })).toEqual({ schemaVersion: 1, state: { sessionId: "native_retry" } });
+  });
+
+  it("rejects new Turn and retry admissions after a Chat is archived", async () => {
+    const chatId = "chat_archived_admission";
+    await repository.create(owner, {
+      id: chatId,
+      clientRequestId: "req_create_archived_admission",
+      title: "Archived admission",
+    });
+    const inputMessage = message(chatId);
+    const inputTurn = turn(chatId, inputMessage, "req_archived_seed");
+    const firstRun = run(chatId, inputTurn);
+    await repository.admitTurn(owner, {
+      chatId,
+      baseRevision: 0,
+      message: inputMessage,
+      turn: inputTurn,
+      run: firstRun,
+    });
+    await repository.finishRun(owner, {
+      chatId,
+      runId: firstRun.id,
+      outcome: "failed",
+      completedAt: now,
+    });
+    const beforeArchive = await repository.get(owner, chatId);
+    expect(beforeArchive).not.toBeNull();
+    const archived = await repository.update(owner, chatId, {
+      baseRevision: beforeArchive!.chat.revision,
+      lifecycle: "archived",
+    });
+
+    const nextMessage = message(chatId, 2);
+    const nextTurn = turn(chatId, nextMessage, "req_archived_new_turn");
+    await expect(repository.admitTurn(owner, {
+      chatId,
+      baseRevision: archived.chat.revision,
+      message: nextMessage,
+      turn: nextTurn,
+      run: run(chatId, nextTurn, 1),
+    })).rejects.toBeInstanceOf(ChatConflictError);
+    await expect(repository.admitRetry(owner, {
+      chatId,
+      turnId: inputTurn.id,
+      clientRequestId: "req_archived_retry",
+      baseRevision: archived.chat.revision,
+      run: run(chatId, inputTurn, 2),
+    })).rejects.toBeInstanceOf(ChatConflictError);
   });
 
   it("rejects a Turn whose input message does not belong to that Turn", async () => {
@@ -415,6 +530,72 @@ describe("ChatRepository", () => {
     });
   });
 
+  it("commits assistant output with the terminal transition and rejects late Provider events", async () => {
+    const created = await repository.create(owner, {
+      id: "chat_terminal_output",
+      clientRequestId: "req_create_terminal_output",
+      title: "Terminal output",
+    });
+    const input = message(created.chat.id);
+    const acceptedTurn = turn(created.chat.id, input);
+    const acceptedRun = run(created.chat.id, acceptedTurn);
+    await repository.admitTurn(owner, {
+      chatId: created.chat.id,
+      baseRevision: 0,
+      message: input,
+      turn: acceptedTurn,
+      run: acceptedRun,
+      adapterState: { schemaVersion: 1, state: { sessionId: "native_1" } },
+    });
+
+    await repository.markRunRunning(owner, {
+      chatId: created.chat.id,
+      runId: acceptedRun.id,
+      startedAt: "2026-08-25T00:00:30.000Z",
+    });
+    await repository.updateAdapterState(owner, {
+      chatId: created.chat.id,
+      runId: acceptedRun.id,
+      driverKind: "codex",
+      instanceId: "codex_default",
+      schemaVersion: 1,
+      state: { sessionId: "native_2" },
+    });
+    const assistant: CanonicalChatMessage = {
+      id: "msg_terminal_output_assistant",
+      chatId: created.chat.id,
+      seq: 2,
+      role: "assistant",
+      state: "committed",
+      turnId: acceptedTurn.id,
+      runId: acceptedRun.id,
+      parts: [{ type: "text", text: "done" }],
+      createdAt: "2026-08-25T00:01:00.000Z",
+    };
+    await repository.finishRun(owner, {
+      chatId: created.chat.id,
+      runId: acceptedRun.id,
+      outcome: "completed",
+      completedAt: assistant.createdAt,
+      output: assistant,
+    });
+
+    const snapshot = await repository.exportChat(owner, created.chat.id);
+    expect(snapshot?.messages).toEqual([input, assistant]);
+    expect(snapshot?.turns[0]).toMatchObject({ status: "completed" });
+    expect(snapshot?.runs[0]).toMatchObject({ status: "completed", outcome: "completed" });
+    expect(snapshot?.chat.chat).toMatchObject({ messageCount: 2, lastMessagePreview: "done" });
+    expect(await repository.getAdapterState(owner, {
+      runId: acceptedRun.id,
+      driverKind: "codex",
+      instanceId: "codex_default",
+    })).toEqual({ schemaVersion: 1, state: { sessionId: "native_2" } });
+
+    await expect(repository.appendRunActivities(owner, created.chat.id, acceptedRun.id, [
+      activity(created.chat.id, acceptedRun.id, 99),
+    ])).rejects.toMatchObject({ name: "ChatRunNotActiveError" });
+  });
+
   it("charges the Run event limit only for unseen activity IDs", async () => {
     const created = await repository.create(owner, {
       id: "chat_activity_retry_capacity",
@@ -549,6 +730,41 @@ describe("ChatRepository", () => {
       expect.objectContaining({ chat: expect.objectContaining({ id: created.chat.id }) }),
     ]);
     await expect(repository.search(otherOwner, "message", 200)).resolves.toEqual([]);
+  });
+
+  it("returns the latest bounded detail page with an owner-isolated older-message cursor", async () => {
+    const created = await repository.create(owner, {
+      id: "chat_detail_page",
+      clientRequestId: "req_create_detail_page",
+      title: "Detail page",
+    });
+    await repository.kysely.insertInto("chat_messages").values(
+      [1, 2, 3].map((seq) => ({
+        id: `msg_detail_${seq}`,
+        chat_id: created.chat.id,
+        seq,
+        role: "assistant" as const,
+        state: "committed" as const,
+        turn_id: null,
+        run_id: null,
+        parts: sql`${JSON.stringify([{ type: "text", text: `detail ${seq}` }])}::jsonb`,
+        byte_count: 32,
+        search_text: `detail ${seq}`,
+        created_at: now,
+      })),
+    ).execute();
+
+    const latest = await repository.getDetailPage(owner, created.chat.id, { limit: 2 });
+    expect(latest?.messages.map((entry) => entry.seq)).toEqual([2, 3]);
+    expect(latest?.nextBeforeSeq).toBe(2);
+    const older = await repository.getDetailPage(owner, created.chat.id, {
+      limit: 2,
+      beforeSeq: latest?.nextBeforeSeq,
+    });
+    expect(older?.messages.map((entry) => entry.seq)).toEqual([1]);
+    expect(older?.nextBeforeSeq).toBeUndefined();
+    await expect(repository.getDetailPage(otherOwner, created.chat.id, { limit: 2 }))
+      .resolves.toBeNull();
   });
 
   it("hard-deletes all content once and preserves only a content-free tombstone", async () => {
