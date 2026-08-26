@@ -1,5 +1,5 @@
 import { ChevronRight, CircleAlert, FileText } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Conversation,
   ConversationContent,
@@ -120,18 +120,52 @@ function ResponseMessage({
   message,
   callbacks,
   showMetadata,
+  streaming,
+  animateOnMount,
 }: {
   message: ConversationMessagePresentation;
   callbacks: ConversationPresentationCallbacks;
   showMetadata: boolean;
+  streaming: boolean;
+  animateOnMount: boolean;
 }) {
+  const previousMessageId = useRef(message.id);
+  const [visibleMarkdown, setVisibleMarkdown] = useState(() => (
+    streaming || animateOnMount ? "" : message.markdown
+  ));
+
+  useEffect(() => {
+    if (previousMessageId.current === message.id) return;
+    previousMessageId.current = message.id;
+    setVisibleMarkdown(streaming || animateOnMount ? "" : message.markdown);
+  }, [animateOnMount, message.id, message.markdown, streaming]);
+
+  useEffect(() => {
+    if (visibleMarkdown === message.markdown) return;
+    if (!message.markdown.startsWith(visibleMarkdown)) {
+      setVisibleMarkdown(message.markdown);
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      setVisibleMarkdown((current) => {
+        if (!message.markdown.startsWith(current)) return message.markdown;
+        const targetCharacters = Array.from(message.markdown);
+        const currentLength = Array.from(current).length;
+        const remaining = targetCharacters.length - currentLength;
+        const step = Math.max(1, Math.min(8, Math.ceil(remaining / 12)));
+        return targetCharacters.slice(0, currentLength + step).join("");
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [message.markdown, visibleMarkdown]);
+
   return (
     <ConversationItem messageId={`${message.role}:${message.id}`}>
       <Message>
         <MessageContent>
           <Bubble variant="ghost">
             <BubbleContent className="max-w-[620px] overflow-visible">
-              <MessageResponse copyText={callbacks.copyText}>{message.markdown}</MessageResponse>
+              <MessageResponse copyText={callbacks.copyText}>{visibleMarkdown}</MessageResponse>
             </BubbleContent>
           </Bubble>
           {showMetadata ? (
@@ -163,16 +197,28 @@ function Notice({
           <Bubble variant="ghost">
             <BubbleContent
               {...(failed ? { role: "status", "aria-label": notice.label } : {})}
-              className={`max-w-[620px] rounded-lg border px-3 py-2 text-sm ${failed ? "flex items-start gap-2" : ""}`}
+              className={`max-w-[620px] rounded-xl px-3.5 py-3 text-sm ${failed ? "flex items-start gap-2.5" : ""}`}
               style={{
-                borderColor: failed
-                  ? "color-mix(in srgb, var(--danger) 35%, var(--border-subtle))"
-                  : "var(--border-subtle)",
-                color: failed ? "var(--danger)" : "var(--text-secondary)",
+                background: failed
+                  ? "color-mix(in srgb, var(--danger) 8%, transparent)"
+                  : "var(--bg-sunken)",
+                color: "var(--text-primary)",
               }}
             >
-              {failed ? <CircleAlert size={15} aria-hidden className="mt-0.5 shrink-0" /> : null}
-              <MessageResponse copyText={callbacks.copyText}>{notice.markdown}</MessageResponse>
+              {failed ? (
+                <CircleAlert
+                  size={16}
+                  aria-hidden
+                  className="mt-0.5 shrink-0"
+                  style={{ color: "var(--danger)" }}
+                />
+              ) : null}
+              <div className="min-w-0">
+                <p className="font-medium leading-5">{notice.label}</p>
+                <div className="mt-0.5 leading-5" style={{ color: "var(--text-secondary)" }}>
+                  <MessageResponse copyText={callbacks.copyText}>{notice.markdown}</MessageResponse>
+                </div>
+              </div>
             </BubbleContent>
           </Bubble>
         </MessageContent>
@@ -185,10 +231,14 @@ function PresentationItem({
   item,
   callbacks,
   showMetadata = false,
+  streaming = false,
+  animateOnMount = false,
 }: {
   item: ConversationWorkPresentation;
   callbacks: ConversationPresentationCallbacks;
   showMetadata?: boolean;
+  streaming?: boolean;
+  animateOnMount?: boolean;
 }) {
   if (item.kind === "activity-group") {
     return (
@@ -198,15 +248,25 @@ function PresentationItem({
     );
   }
   if (item.kind === "notice") return <Notice notice={item} callbacks={callbacks} />;
-  return <ResponseMessage message={item} callbacks={callbacks} showMetadata={showMetadata} />;
+  return (
+    <ResponseMessage
+      message={item}
+      callbacks={callbacks}
+      showMetadata={showMetadata}
+      streaming={streaming}
+      animateOnMount={animateOnMount}
+    />
+  );
 }
 
 function ConversationTurn({
   turn,
   callbacks,
+  initialFinalIds,
 }: {
   turn: ConversationTurnPresentation;
   callbacks: ConversationPresentationCallbacks;
+  initialFinalIds: ReadonlySet<string>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const showWork = turn.active || expanded;
@@ -228,7 +288,13 @@ function ConversationTurn({
         <PresentationItem key={item.id} item={item} callbacks={callbacks} />
       )) : null}
       {turn.final ? (
-        <PresentationItem item={turn.final} callbacks={callbacks} showMetadata={!turn.active} />
+        <PresentationItem
+          item={turn.final}
+          callbacks={callbacks}
+          showMetadata={!turn.active}
+          streaming={turn.active}
+          animateOnMount={!initialFinalIds.has(turn.final.id)}
+        />
       ) : null}
     </>
   );
@@ -241,11 +307,19 @@ export function ConversationTranscript({
   turns: ConversationTurnPresentation[];
   callbacks: ConversationPresentationCallbacks;
 }) {
+  const initialFinalIds = useRef(new Set(
+    turns.flatMap((turn) => turn.final ? [turn.final.id] : []),
+  ));
   return (
     <Conversation>
       <ConversationContent className="justify-start pt-8 sm:pt-12">
         {turns.map((turn) => (
-          <ConversationTurn key={turn.id} turn={turn} callbacks={callbacks} />
+          <ConversationTurn
+            key={turn.id}
+            turn={turn}
+            callbacks={callbacks}
+            initialFinalIds={initialFinalIds.current}
+          />
         ))}
       </ConversationContent>
     </Conversation>

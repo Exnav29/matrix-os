@@ -53,6 +53,32 @@ describe("canonical Chat client", () => {
     expect(page.items[0]?.chat.id).toBe("chat_client_test");
   });
 
+  it("lists Global Chats without mixing in Project-bound Chats", async () => {
+    const get = vi.fn(async () => ({ items: [record] }));
+    const client = createCanonicalChatClient(api({ get }));
+
+    await client.list({ projectId: null });
+
+    expect(get).toHaveBeenCalledWith("/api/chats?scope=global");
+  });
+
+  it("searches the same Chat identity within Global or Project scope", async () => {
+    const get = vi.fn(async () => ({ items: [record] }));
+    const client = createCanonicalChatClient(api({ get }));
+
+    await client.search("release plan", { projectId: "project_1", limit: 10 });
+    await client.search("release plan", { projectId: null });
+
+    expect(get).toHaveBeenNthCalledWith(
+      1,
+      "/api/chats/search?query=release+plan&limit=10&projectId=project_1",
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      2,
+      "/api/chats/search?query=release+plan&scope=global",
+    );
+  });
+
   it("creates a Chat without accepting client-owned identity fields", async () => {
     const post = vi.fn(async () => record);
     const client = createCanonicalChatClient(api({ post }));
@@ -71,6 +97,42 @@ describe("canonical Chat client", () => {
       title: "Client test",
       ownerScope: { type: "personal", ownerId: "other" },
     } as never)).rejects.toThrow();
+  });
+
+  it("moves a Chat between Global and Project scopes through one guarded mutation", async () => {
+    const movedRecord = { ...record, projectId: "project_1" };
+    const patch = vi.fn(async () => movedRecord);
+    const client = createCanonicalChatClient(api({ patch }));
+
+    await expect(client.updateProject(record.chat.id, {
+      baseRevision: 0,
+      projectId: "project_1",
+    })).resolves.toEqual(movedRecord);
+    expect(patch).toHaveBeenCalledWith("/api/chats/chat_client_test/project", {
+      baseRevision: 0,
+      projectId: "project_1",
+    });
+
+    await expect(client.updateProject(record.chat.id, {
+      baseRevision: 1,
+      projectId: null,
+    })).resolves.toEqual(movedRecord);
+  });
+
+  it("deletes a Chat through the canonical Gateway endpoint", async () => {
+    const remove = vi.fn(async () => ({
+      chatId: record.chat.id,
+      deletedAt: "2026-08-26T12:00:00.000Z",
+    }));
+    const client = createCanonicalChatClient(api({ delete: remove }));
+
+    await expect(client.delete(record.chat.id, "req_client_delete")).resolves.toEqual({
+      chatId: record.chat.id,
+      deletedAt: "2026-08-26T12:00:00.000Z",
+    });
+    expect(remove).toHaveBeenCalledWith(
+      "/api/chats/chat_client_test?clientRequestId=req_client_delete",
+    );
   });
 
   it("loads a bounded message page and rejects malformed Gateway projections", async () => {

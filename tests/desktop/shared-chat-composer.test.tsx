@@ -13,6 +13,7 @@ import {
   createCanonicalComposerSelection,
   type CanonicalComposerSelection,
 } from "../../desktop/src/renderer/src/features/chat/canonical-composer-state";
+import { insertSharedComposerTextAtSelection } from "./shared-chat-composer-test-utils";
 
 function catalogFixture(): CanonicalProviderCatalog {
   const support = {
@@ -107,7 +108,7 @@ function catalogFixture(): CanonicalProviderCatalog {
         availability: "auth_required",
         workspaceRequirement: "project_optional",
         catalogRevision: "catalog_fixture",
-        models: [{ id: "provider-default", displayName: "Provider default", availability: "auth_required", capabilities: ["reasoning", "tools"], supportsVision: false, supportsToolUse: true }],
+        models: [],
         options: [],
         skills: [],
         commands: [],
@@ -179,7 +180,7 @@ function Harness({
   onSubmit?: (submission: SharedChatComposerSubmission) => void;
   resourceSearch?: (query: string) => Promise<Array<{ kind: "file" | "folder"; id: string; label: string }>>;
   menuSide?: "top" | "bottom";
-  onAttach?: () => void;
+  onAttach?: (() => void) | null;
   onProviderSetup?: (instanceId: string, actionId: string) => void;
   initialValue?: string;
   initialReferenceTokens?: ComposerReferenceToken[];
@@ -209,7 +210,7 @@ function Harness({
         { kind: "folder", id: "src", label: "src" },
       ]}
       resourceSearch={resourceSearch}
-      onAttach={onAttach}
+      onAttach={onAttach ?? undefined}
       onProviderSetup={(instance, action) => onProviderSetup(instance.id, action.id)}
       menuSide={menuSide}
     />
@@ -375,7 +376,7 @@ describe("SharedChatComposer", () => {
       .toBe("bottom");
   });
 
-  it("shows fixed Hermes effort and permission capabilities instead of hiding them", () => {
+  it("hides effort and permission controls when the Harness does not expose a choice", () => {
     const catalog = fixedHermesCatalogFixture();
     const selection = createCanonicalComposerSelection(catalog)!;
     render(
@@ -391,12 +392,8 @@ describe("SharedChatComposer", () => {
       />,
     );
 
-    const effort = screen.getByRole("button", { name: "Reasoning effort" });
-    expect(effort.textContent).toContain("Default");
-    expect(effort.hasAttribute("disabled")).toBe(true);
-    const permission = screen.getByRole("button", { name: "Permission mode" });
-    expect(permission.textContent).toContain("supervised");
-    expect(permission.hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByRole("button", { name: "Reasoning effort" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Permission mode" })).toBeNull();
   });
 
   it("labels a system-harness model with its actual model provider", () => {
@@ -451,8 +448,8 @@ describe("SharedChatComposer", () => {
     expect(opencode.className).toContain("opacity-35");
     expect(opencode.getAttribute("title")).toContain("OpenCode — Authentication required");
     fireEvent.click(opencode);
-    expect(screen.getByRole("option", { name: /Provider default.*OpenCode/ }).getAttribute("aria-disabled"))
-      .toBe("true");
+    expect(screen.getByText("No models found.")).toBeTruthy();
+    expect(screen.queryByRole("option")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Connect OpenCode" }));
     expect(onProviderSetup).toHaveBeenCalledWith("opencode_default", "opencode_connect");
   });
@@ -577,6 +574,35 @@ describe("SharedChatComposer", () => {
     await waitFor(() => expect(screen.queryByTestId("composer-reference-token-skill-review")).toBeNull());
   });
 
+  it("moves the caret across inline tokens with the arrow keys", async () => {
+    render(<Harness
+      initialValue="A /review B"
+      initialReferenceTokens={[{
+        type: "invocation",
+        label: "Review",
+        invocation: { kind: "skill", descriptorId: "review", invocation: "/review" },
+      }]}
+    />);
+
+    const input = screen.getByRole("textbox", { name: "Message chat" });
+    const decorator = screen.getByTestId("composer-reference-token-skill-review")
+      .closest('[data-lexical-decorator="true"]');
+    expect(decorator).toBeTruthy();
+
+    const range = document.createRange();
+    range.setStartAfter(decorator!);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    fireEvent(document, new Event("selectionchange"));
+
+    fireEvent.keyDown(input, { key: "ArrowLeft", code: "ArrowLeft" });
+    await insertSharedComposerTextAtSelection(input, "X");
+
+    await waitFor(() => expect(input.textContent).toBe("A X/review B"));
+  });
+
   it("preserves arbitrary text, resource, and skill order inside one editable prompt", () => {
     render(<Harness
       initialValue="Inspect [src/index.ts](src-index) with /review please"
@@ -616,7 +642,104 @@ describe("SharedChatComposer", () => {
     expect(promptFlow.className).toContain("border-0");
     expect(promptFlow.className).toContain("ring-0");
     expect(promptFlow.className).toContain("pt-1");
-    expect(promptFlow.className).not.toContain("pt-3");
+  });
+
+  it("aligns the empty placeholder with the editable prompt baseline", () => {
+    const { container } = render(<Harness />);
+    const prompt = screen.getByRole("textbox", { name: "Message chat" });
+    const placeholder = container.querySelector<HTMLElement>('[data-slot="prompt-input-placeholder"]');
+
+    expect(prompt.className).toContain("pt-1");
+    expect(placeholder?.className).toContain("top-1");
+    expect(placeholder?.className).not.toContain("top-4");
+  });
+
+  it("copies visible token text and restores structured tokens when pasted back", async () => {
+    const first = render(<Harness
+      initialValue="Use /review on [src/index.ts](src-index) now"
+      initialReferenceTokens={[
+        {
+          type: "invocation",
+          label: "Review",
+          invocation: { kind: "skill", descriptorId: "review", invocation: "/review" },
+        },
+        { type: "resource", resource: { kind: "file", id: "src-index", label: "src/index.ts" } },
+      ]}
+    />);
+    const input = screen.getByRole("textbox", { name: "Message chat" });
+    const clipboard = new Map<string, string>();
+    const setData = vi.fn((type: string, value: string) => clipboard.set(type, value));
+
+    fireEvent.keyDown(input, { key: "a", code: "KeyA", ctrlKey: true });
+    fireEvent.copy(input, { clipboardData: { setData } });
+
+    await waitFor(() => expect(setData).toHaveBeenCalledWith(
+      "text/plain",
+      "Use /review on src/index.ts now",
+    ));
+    expect(clipboard.get("application/x-matrix-chat-composer+json")).toBeTruthy();
+    expect(screen.getByTestId("composer-reference-token-skill-review").className)
+      .toContain("select-text");
+    expect(screen.getByTestId("composer-reference-token-file-src-index").className)
+      .toContain("select-text");
+
+    first.unmount();
+    render(<Harness initialValue="" />);
+    const target = screen.getByRole("textbox", { name: "Message chat" });
+    fireEvent.paste(target, {
+      clipboardData: { getData: (type: string) => clipboard.get(type) ?? "" },
+    });
+
+    await waitFor(() => expect(target.textContent).toBe("Use /review on src/index.ts now"));
+    expect(screen.getByTestId("composer-reference-token-skill-review")).toBeTruthy();
+    expect(screen.getByTestId("composer-reference-token-file-src-index")).toBeTruthy();
+  });
+
+  it("selects and preserves one structured token when it is double-clicked and copied", async () => {
+    const first = render(<Harness
+      initialValue="Inspect [src/index.ts](src-index)"
+      initialReferenceTokens={[
+        { type: "resource", resource: { kind: "file", id: "src-index", label: "src/index.ts" } },
+      ]}
+    />);
+
+    const token = screen.getByTestId("composer-reference-token-file-src-index");
+    fireEvent.doubleClick(token);
+    await waitFor(() => expect(token.getAttribute("data-selected")).toBe("true"));
+
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Message chat" }), {
+      key: "c",
+      code: "KeyC",
+      metaKey: true,
+    });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("src/index.ts"));
+    if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+    else Reflect.deleteProperty(navigator, "clipboard");
+
+    const clipboard = new Map<string, string>();
+    const setData = vi.fn((type: string, value: string) => clipboard.set(type, value));
+    fireEvent.copy(screen.getByRole("textbox", { name: "Message chat" }), {
+      clipboardData: { setData },
+    });
+
+    await waitFor(() => expect(setData).toHaveBeenCalledWith("text/plain", "src/index.ts"));
+    expect(clipboard.get("application/x-matrix-chat-composer+json")).toBeTruthy();
+
+    first.unmount();
+    render(<Harness initialValue="" />);
+    const target = screen.getByRole("textbox", { name: "Message chat" });
+    fireEvent.paste(target, {
+      clipboardData: { getData: (type: string) => type === "text/plain" ? "src/index.ts" : "" },
+    });
+
+    await waitFor(() => expect(target.textContent).toBe("src/index.ts"));
+    expect(screen.getByTestId("composer-reference-token-file-src-index")).toBeTruthy();
   });
 
   it("renders distinct T3-style file type glyphs for TypeScript and JSON references", () => {
@@ -698,6 +821,26 @@ describe("SharedChatComposer", () => {
     await waitFor(() => expect(input.textContent).toBe("/status "));
     expect(screen.getByTestId("composer-reference-token-command-status").textContent)
       .toContain("/status");
+  });
+
+  it("does not submit while an @ suggestion search is still resolving", async () => {
+    let resolveSearch!: (resources: Array<{ kind: "file"; id: string; label: string }>) => void;
+    const resourceSearch = vi.fn(() => new Promise<Array<{ kind: "file"; id: string; label: string }>>((resolve) => {
+      resolveSearch = resolve;
+    }));
+    const onSubmit = vi.fn();
+    render(<Harness resourceSearch={resourceSearch} initialValue="@read" onSubmit={onSubmit} onAttach={null} />);
+    const input = screen.getByLabelText("Message chat");
+
+    await waitFor(() => expect(resourceSearch).toHaveBeenCalledWith("read"));
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    resolveSearch([{ kind: "file", id: "readme", label: "README.md" }]);
+    await screen.findByRole("option", { name: /README.md/ });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(input.textContent).toBe("README.md "));
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("navigates the model picker from its search field", () => {

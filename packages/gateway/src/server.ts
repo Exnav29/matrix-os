@@ -51,10 +51,14 @@ import { createReviewStore } from "./review-store.js";
 import { createElixirSymphonyProxyRoutes } from "./symphony/proxy.js";
 import { createSymphonyRunner } from "./symphony-runner.js";
 import { createAgentLauncher } from "./agent-launcher.js";
+import { resolveAgentCredentialProbe } from "./onboarding/agent-credential-probe.js";
 import { createAgentSessionManager } from "./agent-session-manager.js";
 import { createAgentSandbox } from "./agent-sandbox.js";
 import { createWorktreeManager } from "./worktree-manager.js";
-import { createWorkspaceSessionOrchestrator } from "./workspace-session-orchestrator.js";
+import {
+  createWorkspaceSessionOrchestrator,
+  type WorkspaceSessionOrchestrator,
+} from "./workspace-session-orchestrator.js";
 import { createWorkspaceEventStore } from "./workspace-events.js";
 import { createWorkspaceEventPublisher } from "./workspace-event-publisher.js";
 import { createZellijRuntime } from "./zellij-runtime.js";
@@ -135,8 +139,9 @@ import { createChatProviderCatalogService } from "./chat/provider-catalog.js";
 import { createCodexModelCatalogSource } from "./chat/codex-model-catalog.js";
 import { createChatProviderRoutes } from "./chat/provider-routes.js";
 import { createCanonicalChatRoutes } from "./chat/routes.js";
-import { createChatExecutionRootResolver } from "./chat/execution-root.js";
+import { createChatExecutionRootResolver, type ChatExecutionRootResolver } from "./chat/execution-root.js";
 import { createHermesChatProviderAdapter } from "./chat/hermes-provider-adapter.js";
+import { createClaudeChatProviderAdapter } from "./chat/claude-provider-adapter.js";
 import { createCanonicalCodingChatProviderAdapter } from "./chat/coding-provider-adapter.js";
 import {
   CanonicalChatProviderRegistry,
@@ -592,24 +597,12 @@ export async function createGateway(config: GatewayConfig) {
     probeAgent: async (_ownerId, agent) => {
       const detected = await agentCredentialLauncher.detectAgentCredentials();
       const status = detected.agents.find((candidate) => candidate.id === agent);
-      return {
-        available: Boolean(status?.installed && status.authState === "ok"),
-        condition: status?.errorCode === "agent_missing"
-          ? "missing"
-          : status?.errorCode === "agent_auth_required"
-            ? "auth_required"
-            : status?.errorCode === "agent_version_unsupported"
-              ? "version_unsupported"
-              : status?.errorCode === "agent_check_failed"
-                ? "check_failed"
-                : status?.authState === "ok"
-                  ? "available"
-                  : "check_failed",
-      };
+      return resolveAgentCredentialProbe(homePath, agent, status);
     },
   });
   let codingAgentThreadStore: (CodingAgentThreadStore & CodingAgentTurnStore) | undefined;
   let codexEventBridge: CodexEventBridge | undefined;
+  let codingAgentWorkspaceRuntime: WorkspaceSessionOrchestrator | null = null;
   let codingAgentApprovalsEnabled = false;
   const codingAgentSessionStopReconciler = createCodingAgentSessionStopReconciler();
   const workspaceEventStore = createWorkspaceEventStore({ homePath });
@@ -662,7 +655,8 @@ export async function createGateway(config: GatewayConfig) {
       inputWriter: (sessionId, input, signal) =>
         workspaceZellijRuntime.sendInput(sessionId, input, signal),
     });
-    const codingAgentWorkspaceRuntime = createWorkspaceSessionOrchestrator({
+    codingAgentWorkspaceRuntime = createWorkspaceSessionOrchestrator({
+      homePath,
       projectManager: codingAgentProjectManager,
       worktreeManager: codingAgentWorktreeManager,
       agentSessionManager: codingAgentSessionManager,
@@ -866,6 +860,7 @@ export async function createGateway(config: GatewayConfig) {
   let canvasCleanupTimer: ReturnType<typeof setInterval> | null = null;
   let chatRepository: ChatRepository | null = null;
   let canonicalChatOrchestrator: CanonicalChatOrchestrator | null = null;
+  let canonicalChatExecutionRoots: ChatExecutionRootResolver | null = null;
   let messagingRepository: MessagingKyselyRepository | null = null;
 
   if (databaseUrl) {
@@ -4145,9 +4140,20 @@ export async function createGateway(config: GatewayConfig) {
     client: hermesClient,
   });
   await agentRuntimeServices.controller.reconcile();
+  const canonicalExecutableDriverKinds = [
+    "hermes" as const,
+    ...(codingAgentProviders.some((provider) => provider.providerId === "claude")
+      ? ["claude_code" as const]
+      : []),
+    ...(codingAgentThreadStore
+      && codingAgentProviders.some((provider) => provider.providerId === "codex")
+      ? ["codex" as const]
+      : []),
+  ];
   const canonicalChatProviderCatalog = createChatProviderCatalogService({
     codingProviders: codingAgentProviderRegistry,
     agentRuntimeSource: agentRuntimeServices.source,
+    executableDriverKinds: canonicalExecutableDriverKinds,
     skillsSource: () => loadSkills(homePath),
     ...(codexExecutable ? {
       codingModelCatalogSource: createCodexModelCatalogSource({
@@ -4157,19 +4163,21 @@ export async function createGateway(config: GatewayConfig) {
     } : {}),
   });
   if (chatRepository) {
+    canonicalChatExecutionRoots = createChatExecutionRootResolver({
+      homePath,
+      projects: codingAgentProjectManager,
+      worktrees: codingAgentWorktreeManager,
+    });
     const canonicalAdapters: CanonicalChatProviderAdapter[] = [
-      createHermesChatProviderAdapter({ dispatcher }),
+      createHermesChatProviderAdapter({ homePath }),
     ];
+    if (codingAgentProviders.some((provider) => provider.providerId === "claude")) {
+      canonicalAdapters.push(createClaudeChatProviderAdapter({ homePath }));
+    }
     if (codingAgentThreadStore) {
       if (codingAgentProviders.some((provider) => provider.providerId === "codex")) {
         canonicalAdapters.push(createCanonicalCodingChatProviderAdapter({
           providerId: "codex",
-          threads: codingAgentThreadStore,
-        }));
-      }
-      if (codingAgentProviders.some((provider) => provider.providerId === "claude")) {
-        canonicalAdapters.push(createCanonicalCodingChatProviderAdapter({
-          providerId: "claude",
           threads: codingAgentThreadStore,
         }));
       }
@@ -4178,11 +4186,7 @@ export async function createGateway(config: GatewayConfig) {
       repository: chatRepository,
       catalog: canonicalChatProviderCatalog,
       adapters: new CanonicalChatProviderRegistry(canonicalAdapters),
-      executionRoots: createChatExecutionRootResolver({
-        homePath,
-        projects: codingAgentProjectManager,
-        worktrees: codingAgentWorktreeManager,
-      }),
+      executionRoots: canonicalChatExecutionRoots,
     });
     for (const ownerId of new Set(codingAgentOwnerIds)) {
       await canonicalChatOrchestrator.reconcileActiveRuns({ type: "personal", ownerId });
@@ -4190,8 +4194,9 @@ export async function createGateway(config: GatewayConfig) {
   }
   app.route("/", createCanonicalChatRoutes({
     service: chatRepository
-      ? createCanonicalChatService(chatRepository, {
+        ? createCanonicalChatService(chatRepository, {
           ...(canonicalChatOrchestrator ? { orchestrator: canonicalChatOrchestrator } : {}),
+          ...(canonicalChatExecutionRoots ? { executionRoots: canonicalChatExecutionRoots } : {}),
         })
       : createUnavailableCanonicalChatService(),
     getPrincipal: (c) => requireRequestPrincipal(c),
@@ -4496,6 +4501,8 @@ export async function createGateway(config: GatewayConfig) {
       cronService.stop();
       await canonicalChatOrchestrator?.close();
       canonicalChatOrchestrator = null;
+      await codingAgentWorkspaceRuntime?.close();
+      codingAgentWorkspaceRuntime = null;
       await agentRuntimeServices.controller.close();
       await codingAgentTurnLifecycle.shutdown();
       await codexEventBridge?.shutdown();

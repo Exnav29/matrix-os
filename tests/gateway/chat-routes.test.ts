@@ -14,6 +14,7 @@ import { Hono } from "hono";
 import { KyselyPGlite } from "kysely-pglite";
 import { describe, expect, it, vi } from "vitest";
 import { ChatRepository } from "../../packages/gateway/src/chat/repository.js";
+import { ChatBusyError, ChatConflictError } from "../../packages/gateway/src/chat/errors.js";
 import {
   createCanonicalChatRoutes,
   type CanonicalChatRouteService,
@@ -38,7 +39,10 @@ const record: CanonicalChatRecord = {
 function routeService(overrides: Partial<CanonicalChatRouteService> = {}): CanonicalChatRouteService {
   return {
     create: vi.fn(async () => record),
+    updateProject: vi.fn(async () => record),
+    delete: vi.fn(async () => ({ chatId: record.chat.id, deletedAt: record.chat.updatedAt })),
     list: vi.fn(async () => ({ items: [record] })),
+    search: vi.fn(async () => ({ items: [record] })),
     getDetail: vi.fn(async () => ({
       record,
       messages: [],
@@ -112,6 +116,92 @@ describe("canonical Chat routes", () => {
     expect(oversized.status).toBe(413);
   });
 
+  it("moves a Chat with owner-derived identity and a strict revision-guarded body", async () => {
+    const moved = { ...record, projectId: "project_1" };
+    const updateProject = vi.fn(async () => moved);
+    const app = appFor(routeService({ updateProject }));
+
+    const response = await app.request("/api/chats/chat_route_test/project", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseRevision: 0, projectId: "project_1" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(moved);
+    expect(updateProject).toHaveBeenCalledWith(
+      { type: "personal", ownerId: "owner_1" },
+      "chat_route_test",
+      { baseRevision: 0, projectId: "project_1" },
+    );
+
+    const invalid = await app.request("/api/chats/chat_route_test/project", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseRevision: 0, projectId: null, ownerId: "other" }),
+    });
+    expect(invalid.status).toBe(400);
+  });
+
+  it("deletes an owned Chat with an idempotency key", async () => {
+    const remove = vi.fn(async () => ({
+      chatId: record.chat.id,
+      deletedAt: "2026-08-26T12:00:00.000Z",
+    }));
+    const response = await appFor(routeService({ delete: remove })).request(
+      "/api/chats/chat_route_test?clientRequestId=req_route_delete",
+      { method: "DELETE" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(remove).toHaveBeenCalledWith(
+      { type: "personal", ownerId: "owner_1" },
+      "chat_route_test",
+      "req_route_delete",
+    );
+  });
+
+  it("returns safe conflict semantics for stale revisions and active Runs", async () => {
+    const stale = appFor(routeService({
+      updateProject: vi.fn(async () => {
+        throw new ChatConflictError("chat_route_test", 2);
+      }),
+    }));
+    const staleResponse = await stale.request("/api/chats/chat_route_test/project", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseRevision: 1, projectId: "project_1" }),
+    });
+    expect(staleResponse.status).toBe(409);
+    expect(await staleResponse.json()).toEqual({
+      error: {
+        code: "chat_conflict",
+        safeMessage: "Chat changed. Refresh and try again.",
+        retryable: true,
+        recoveryActions: ["retry"],
+      },
+    });
+
+    const busy = appFor(routeService({
+      updateProject: vi.fn(async () => {
+        throw new ChatBusyError("chat_route_test");
+      }),
+    }));
+    const busyResponse = await busy.request("/api/chats/chat_route_test/project", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseRevision: 1, projectId: null }),
+    });
+    expect(busyResponse.status).toBe(409);
+    expect(await busyResponse.json()).toEqual({
+      error: {
+        code: "chat_busy",
+        safeMessage: "This Chat already has an active Run.",
+        retryable: false,
+      },
+    });
+  });
+
   it("passes bounded filters to list and returns an opaque cursor page", async () => {
     const page: CanonicalChatListResponse = { items: [record], nextCursor: "chatcur_next" };
     const list = vi.fn(async () => page);
@@ -124,6 +214,34 @@ describe("canonical Chat routes", () => {
     expect(list).toHaveBeenCalledWith(
       { type: "personal", ownerId: "owner_1" },
       { limit: 25, lifecycle: "active", projectId: "project_1", cursor: "chatcur_prev" },
+    );
+  });
+
+  it("projects only root Chats for the Global route", async () => {
+    const list = vi.fn(async () => ({ items: [record] }));
+    const response = await appFor(routeService({ list })).request(
+      "/api/chats?scope=global",
+    );
+
+    expect(response.status).toBe(200);
+    expect(list).toHaveBeenCalledWith(
+      { type: "personal", ownerId: "owner_1" },
+      { limit: 50, projectId: null },
+    );
+  });
+
+  it("searches canonical Chats within the selected route scope", async () => {
+    const search = vi.fn(async () => ({ items: [record] }));
+    const app = appFor(routeService({ search }));
+
+    const response = await app.request(
+      "/api/chats/search?query=release%20plan&limit=10&projectId=project_1",
+    );
+
+    expect(response.status).toBe(200);
+    expect(search).toHaveBeenCalledWith(
+      { type: "personal", ownerId: "owner_1" },
+      { query: "release plan", limit: 10, projectId: "project_1" },
     );
   });
 

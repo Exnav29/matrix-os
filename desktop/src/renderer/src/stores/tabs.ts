@@ -25,6 +25,8 @@ export interface Tab {
   icon?: string;
   // Identity payload — at most one tab per (kind + key).
   projectSlug?: string;
+  chatId?: string;
+  chatView?: "index" | "draft" | "conversation";
   taskId?: string;
   sessionName?: string;
   slug?: string;
@@ -34,7 +36,7 @@ export interface Tab {
 
 export type RecentViewKind = "conversation" | "terminal" | "project";
 export type RecentViewFilter = "all" | RecentViewKind;
-export type RecentConversationType = "hermes" | "coding-agent";
+export type RecentConversationType = "hermes" | "coding-agent" | "canonical";
 
 export interface RecentView {
   kind: RecentViewKind;
@@ -42,6 +44,7 @@ export interface RecentView {
   label: string;
   visitedAt: number;
   conversationType?: RecentConversationType;
+  projectId?: string | null;
 }
 
 export interface TerminalSessionRequest {
@@ -135,6 +138,7 @@ interface TabsState {
   ensureNavigationScope(scope: string): void;
   recordRecentProject(id: string, label: string): void;
   recordRecentConversation(id: string, label: string): void;
+  recordRecentCanonicalChat(id: string, label: string, projectId: string | null): void;
   recordRecentHermesConversation(id: string, label: string): void;
   recordRecentTerminal(id: string, label: string): void;
   removeRecentView(kind: RecentViewKind, id: string): void;
@@ -168,10 +172,27 @@ export const useTabs = create<TabsState>()((set, get) => ({
     const key = identityKey(spec);
     const existing = get().tabs.find((t) => identityKey(t) === key);
     if (existing) {
-      set((state) => ({
-        activeTabId: existing.id,
-        ...recordHistory(state.viewHistory, state.historyIndex, existing.id),
-      }));
+      set((state) => {
+        const routeOwnsChatSelection = spec.kind === "chat" || spec.kind === "project";
+        const nextChatId = routeOwnsChatSelection || spec.chatId !== undefined
+          ? spec.chatId
+          : existing.chatId;
+        const nextChatView = spec.kind === "chat"
+          ? spec.chatView ?? (nextChatId ? "conversation" : "index")
+          : existing.chatView;
+        const tabs = existing.title === spec.title
+          && existing.chatId === nextChatId
+          && existing.chatView === nextChatView
+          ? state.tabs
+          : state.tabs.map((tab) => tab.id === existing.id
+            ? { ...tab, title: spec.title, chatId: nextChatId, chatView: nextChatView }
+            : tab);
+        return {
+          tabs,
+          activeTabId: existing.id,
+          ...recordHistory(state.viewHistory, state.historyIndex, existing.id),
+        };
+      });
       return existing.id;
     }
     counter += 1;
@@ -325,6 +346,17 @@ export const useTabs = create<TabsState>()((set, get) => ({
     }),
   })),
 
+  recordRecentCanonicalChat: (id, label, projectId) => set((state) => ({
+    recentViews: recordRecent(state.recentViews, {
+      kind: "conversation",
+      id,
+      label,
+      visitedAt: Date.now(),
+      conversationType: "canonical",
+      projectId,
+    }),
+  })),
+
   recordRecentHermesConversation: (id, label) => set((state) => ({
     recentViews: recordRecent(state.recentViews, {
       kind: "conversation",
@@ -354,6 +386,7 @@ export const useTabs = create<TabsState>()((set, get) => ({
       recentViews: state.recentViews.filter((recent) =>
         recent.kind !== "conversation"
         || recent.conversationType === "coding-agent"
+        || recent.conversationType === "canonical"
         || authoritativeIds.has(recent.id),
       ),
     };

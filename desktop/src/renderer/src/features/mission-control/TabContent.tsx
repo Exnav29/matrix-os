@@ -65,7 +65,7 @@ export function TabPane({
     case "home":
       return <HomeTab active={active} layoutRevision={layoutRevision} visualScale={visualScale} />;
     case "chat":
-      return <ChatTab />;
+      return <ChatTab active={active} initialChatId={tab.chatId} initialView={tab.chatView} />;
     case "terminals":
       return <TerminalsTab active={active} visible={visible} />;
     case "files":
@@ -79,7 +79,9 @@ export function TabPane({
         ? <EmbedHost kind="app" slug={tab.slug} appIdentity={tab.appIdentity} active={active} layoutRevision={layoutRevision} visualScale={visualScale} />
         : null;
     case "project":
-      return tab.projectSlug ? <ProjectTab projectSlug={tab.projectSlug} active={active} /> : null;
+      return tab.projectSlug
+        ? <ProjectTab projectSlug={tab.projectSlug} active={active} initialChatId={tab.chatId} />
+        : null;
     case "task":
       return tab.taskId ? <TaskWorkspace taskId={tab.taskId} projectSlug={tab.projectSlug} active={active} /> : null;
     case "terminal":

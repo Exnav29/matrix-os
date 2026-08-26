@@ -1,6 +1,7 @@
 import type { CanonicalChatRecord } from "@matrix-os/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { createCanonicalChatService } from "../../packages/gateway/src/chat/service.js";
+import { ChatExecutionRootError } from "../../packages/gateway/src/chat/execution-root.js";
 import type {
   ChatDetailPage,
   ChatListPage,
@@ -25,10 +26,11 @@ function record(id = "chat_service_test"): CanonicalChatRecord {
   };
 }
 
-function repository(overrides: Partial<Pick<ChatRepository, "create" | "list" | "getDetailPage">> = {}) {
+function repository(overrides: Partial<Pick<ChatRepository, "create" | "list" | "search" | "getDetailPage" | "update" | "hardDelete">> = {}) {
   return {
     create: vi.fn(async () => record()),
     list: vi.fn(async () => ({ items: [record()] } satisfies ChatListPage)),
+    search: vi.fn(async () => [record()]),
     getDetailPage: vi.fn(async () => ({
       record: record(),
       messages: [],
@@ -36,8 +38,10 @@ function repository(overrides: Partial<Pick<ChatRepository, "create" | "list" | 
       runs: [],
       activities: [],
     } satisfies ChatDetailPage)),
+    update: vi.fn(async () => ({ ...record(), projectId: "project_1" })),
+    hardDelete: vi.fn(async () => ({ chatId: "chat_service_test", deletedAt: "2026-08-26T12:00:00.000Z" })),
     ...overrides,
-  } as Pick<ChatRepository, "create" | "list" | "getDetailPage">;
+  } as Pick<ChatRepository, "create" | "list" | "search" | "getDetailPage" | "update" | "hardDelete">;
 }
 
 describe("canonical Chat service", () => {
@@ -54,6 +58,74 @@ describe("canonical Chat service", () => {
       clientRequestId: "req_service_create",
       title: "New chat",
     }));
+  });
+
+  it("moves a Chat without changing its identity or bypassing revision guards", async () => {
+    const update = vi.fn(async () => ({ ...record(), projectId: "project_1" }));
+    const resolve = vi.fn(async () => ({
+      ref: { kind: "project" as const, projectId: "project_1" },
+      primaryWorkspaceRoot: "/private/project",
+      projectSlug: "project-1",
+      fingerprint: "a".repeat(64),
+    }));
+    const service = createCanonicalChatService(repository({ update }), {
+      executionRoots: { resolve },
+    });
+
+    const moved = await service.updateProject(owner, "chat_service_test", {
+      baseRevision: 0,
+      projectId: "project_1",
+    });
+
+    expect(update).toHaveBeenCalledWith(owner, "chat_service_test", {
+      baseRevision: 0,
+      projectId: "project_1",
+    });
+    expect(resolve).toHaveBeenCalledWith(owner, {
+      kind: "project",
+      projectId: "project_1",
+    });
+    expect(moved.chat.id).toBe("chat_service_test");
+    expect(moved.projectId).toBe("project_1");
+  });
+
+  it("delegates canonical deletion to the existing atomic repository tombstone flow", async () => {
+    const hardDelete = vi.fn(async () => ({
+      chatId: "chat_service_test",
+      deletedAt: "2026-08-26T12:00:00.000Z",
+    }));
+    const service = createCanonicalChatService(repository({ hardDelete }));
+
+    await service.delete(owner, "chat_service_test", "req_service_delete");
+
+    expect(hardDelete).toHaveBeenCalledWith(owner, {
+      chatId: "chat_service_test",
+      clientRequestId: "req_service_delete",
+    });
+  });
+
+  it("fails closed before mutation when the target Project is stale", async () => {
+    const update = vi.fn(async () => ({ ...record(), projectId: "project_missing" }));
+    const service = createCanonicalChatService(repository({ update }), {
+      executionRoots: {
+        resolve: vi.fn(async () => {
+          throw new ChatExecutionRootError("invalid_root");
+        }),
+      },
+    });
+
+    await expect(service.updateProject(owner, "chat_service_test", {
+      baseRevision: 0,
+      projectId: "project_missing",
+    })).rejects.toMatchObject({
+      status: 409,
+      safeError: {
+        code: "project_unavailable",
+        safeMessage: "The Project workspace is unavailable.",
+        retryable: false,
+      },
+    });
+    expect(update).not.toHaveBeenCalled();
   });
 
   it("round-trips opaque list cursors without exposing repository cursor fields", async () => {
@@ -79,6 +151,29 @@ describe("canonical Chat service", () => {
         chatId: "chat_service_test",
       },
     });
+  });
+
+  it("preserves the explicit Global scope as a null Project filter", async () => {
+    const list = vi.fn(async () => ({ items: [record()] } satisfies ChatListPage));
+    const service = createCanonicalChatService(repository({ list }));
+
+    await service.list(owner, { limit: 50, scope: "global", projectId: null });
+
+    expect(list).toHaveBeenCalledWith(owner, { limit: 50, projectId: null });
+  });
+
+  it("searches the same owner-local index with a Project scope", async () => {
+    const search = vi.fn(async () => [{ ...record(), projectId: "project_1" }]);
+    const service = createCanonicalChatService(repository({ search }));
+
+    const result = await service.search(owner, {
+      query: "release plan",
+      limit: 10,
+      projectId: "project_1",
+    });
+
+    expect(search).toHaveBeenCalledWith(owner, "release plan", 10, "project_1");
+    expect(result.items[0]?.projectId).toBe("project_1");
   });
 
   it("normalizes malformed opaque cursor payloads as validation errors", async () => {

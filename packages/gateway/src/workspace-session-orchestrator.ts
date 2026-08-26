@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { AgentAttachment } from "@matrix-os/contracts";
+import { lstat, mkdir, opendir, realpath, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import type { AgentAttachment, AgentModelOption } from "@matrix-os/contracts";
 import type {
   WorkspaceSessionView,
   createAgentSessionManager,
@@ -27,6 +29,12 @@ type SessionRuntimeBridge = Pick<ReturnType<typeof createSessionRuntimeBridge>, 
 type SessionAttachMode = "observe" | "owner";
 type ListSessionsInput = Parameters<AgentSessionManager["listSessions"]>[0];
 
+const ROOT_WORKSPACE_TTL_MS = 24 * 60 * 60 * 1_000;
+const ROOT_WORKSPACE_SWEEP_INTERVAL_MS = 60 * 60 * 1_000;
+const ROOT_SESSION_PAGE_LIMIT = 100;
+const ROOT_SESSION_PAGE_CAP = 20;
+const ACTIVE_ROOT_SESSION_STATUSES = new Set(["starting", "running", "idle", "waiting"]);
+
 type Failure = {
   ok: false;
   status: number;
@@ -45,11 +53,15 @@ export interface StartWorkspaceSessionRequest {
   agent?: SupportedAgent;
   prompt?: string;
   attachments?: AgentAttachment[];
+  model?: string;
+  modelOptions?: AgentModelOption[];
   mode?: "default" | "plan" | "review" | "full_access";
   approvalPolicy?: "untrusted" | "on_request" | "on_failure" | "never";
   sandboxMode?: "read_only" | "workspace_write" | "full_access";
   runtimePreference?: "zellij";
   adminSandboxOverride?: boolean;
+  /** Gateway-internal execution root for a Root Chat. Never accepted by public routes. */
+  workspaceRoot?: string;
 }
 
 export interface StartWorkspaceSessionInput {
@@ -152,6 +164,82 @@ async function resolveAgentSandbox(options: {
   };
 }
 
+function errnoIs(error: unknown, code: string): boolean {
+  return error instanceof Error
+    && "code" in error
+    && (error as NodeJS.ErrnoException).code === code;
+}
+
+async function prepareRootChatWorkspace(homePath: string, sessionId: string): Promise<string> {
+  const canonicalHome = await realpath(resolve(homePath));
+  const root = join(canonicalHome, "temporary", "root-chat-workspaces");
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const rootStats = await lstat(root);
+  if (!rootStats.isDirectory() || rootStats.isSymbolicLink() || await realpath(root) !== root) {
+    throw new Error("Root Chat workspace root is invalid");
+  }
+  const workspace = join(root, sessionId);
+  await mkdir(workspace, { mode: 0o700 });
+  const workspaceStats = await lstat(workspace);
+  if (!workspaceStats.isDirectory() || workspaceStats.isSymbolicLink() || await realpath(workspace) !== workspace) {
+    throw new Error("Root Chat workspace is invalid");
+  }
+  return workspace;
+}
+
+async function cleanupRootChatWorkspace(homePath: string, sessionId: string): Promise<void> {
+  const canonicalHome = await realpath(resolve(homePath));
+  const root = join(canonicalHome, "temporary", "root-chat-workspaces");
+  try {
+    const rootStats = await lstat(root);
+    if (!rootStats.isDirectory() || rootStats.isSymbolicLink() || await realpath(root) !== root) return;
+    const workspace = join(root, sessionId);
+    const workspaceStats = await lstat(workspace);
+    if (!workspaceStats.isDirectory() || workspaceStats.isSymbolicLink()) return;
+    if (await realpath(workspace) !== workspace) return;
+    await rm(workspace, { recursive: true, force: true });
+  } catch (error: unknown) {
+    if (!errnoIs(error, "ENOENT")) throw error;
+  }
+}
+
+export async function cleanupExpiredRootChatWorkspaces(
+  homePath: string,
+  activeSessionIds: ReadonlySet<string>,
+  options: { nowMs?: number; ttlMs?: number } = {},
+): Promise<void> {
+  const canonicalHome = await realpath(resolve(homePath));
+  const root = join(canonicalHome, "temporary", "root-chat-workspaces");
+  const nowMs = options.nowMs ?? Date.now();
+  const ttlMs = options.ttlMs ?? ROOT_WORKSPACE_TTL_MS;
+  let directory: Awaited<ReturnType<typeof opendir>>;
+  try {
+    const rootStats = await lstat(root);
+    if (!rootStats.isDirectory() || rootStats.isSymbolicLink() || await realpath(root) !== root) return;
+    directory = await opendir(root);
+  } catch (error: unknown) {
+    if (errnoIs(error, "ENOENT")) return;
+    throw error;
+  }
+
+  for await (const entry of directory) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || activeSessionIds.has(entry.name)) continue;
+    const workspace = join(root, entry.name);
+    try {
+      const stats = await lstat(workspace);
+      if (!stats.isDirectory() || stats.isSymbolicLink()) continue;
+      if (await realpath(workspace) !== workspace) continue;
+      if (nowMs - stats.mtimeMs <= ttlMs) continue;
+      await rm(workspace, { recursive: true, force: true });
+    } catch (error: unknown) {
+      if (!errnoIs(error, "ENOENT")) {
+        console.warn("[workspace-session-orchestrator] Root Chat workspace cleanup failed:",
+          error instanceof Error ? error.name : "UnknownError");
+      }
+    }
+  }
+}
+
 export function createWorkspaceSessionOrchestrator(options: {
   projectManager: ProjectManager;
   worktreeManager: WorktreeManager;
@@ -160,8 +248,58 @@ export function createWorkspaceSessionOrchestrator(options: {
   sessionRuntimeBridge: SessionRuntimeBridge;
   eventPublisher?: Pick<WorkspaceEventPublisher, "publishSessionStarted" | "publishSessionStopped">;
   idGenerator?: () => string;
+  homePath?: string;
+  prepareRootChatWorkspace?: (sessionId: string) => Promise<string>;
+  cleanupRootChatWorkspace?: (sessionId: string) => Promise<void>;
+  sweepRootChatWorkspaces?: (activeSessionIds: ReadonlySet<string>) => Promise<void>;
+  rootWorkspaceSweepIntervalMs?: number;
 }) {
   const idGenerator = options.idGenerator ?? (() => `sess_${randomUUID()}`);
+  const prepareRootWorkspace = options.prepareRootChatWorkspace
+    ?? (options.homePath ? (sessionId: string) => prepareRootChatWorkspace(options.homePath!, sessionId) : undefined);
+  const cleanupRootWorkspace = options.cleanupRootChatWorkspace
+    ?? (options.homePath ? (sessionId: string) => cleanupRootChatWorkspace(options.homePath!, sessionId) : undefined);
+  const sweepRootWorkspaces = options.sweepRootChatWorkspaces
+    ?? (options.homePath
+      ? (activeSessionIds: ReadonlySet<string>) => cleanupExpiredRootChatWorkspaces(options.homePath!, activeSessionIds)
+      : undefined);
+  let sweepTask: Promise<void> | null = null;
+  const startSweep = () => {
+    if (!sweepRootWorkspaces || sweepTask) return;
+    sweepTask = (async () => {
+      const activeSessionIds = new Set<string>();
+      let cursor: string | undefined;
+      for (let pageIndex = 0; pageIndex < ROOT_SESSION_PAGE_CAP; pageIndex += 1) {
+        const listed = await options.agentSessionManager.listSessions({
+          limit: ROOT_SESSION_PAGE_LIMIT,
+          ...(cursor ? { cursor } : {}),
+        });
+        if (!listed.ok) return;
+        for (const session of listed.sessions) {
+          if (
+            session.kind === "agent"
+            && !session.projectSlug
+            && ACTIVE_ROOT_SESSION_STATUSES.has(session.runtime.status)
+          ) activeSessionIds.add(session.id);
+        }
+        if (!listed.nextCursor) {
+          await sweepRootWorkspaces(activeSessionIds);
+          return;
+        }
+        cursor = listed.nextCursor;
+      }
+      console.warn("[workspace-session-orchestrator] Root Chat workspace sweep skipped: session page cap reached");
+    })().catch((error: unknown) => {
+      console.warn("[workspace-session-orchestrator] Root Chat workspace sweep failed:",
+        error instanceof Error ? error.name : "UnknownError");
+    }).finally(() => {
+      sweepTask = null;
+    });
+  };
+  const sweepTimer = sweepRootWorkspaces
+    ? setInterval(startSweep, options.rootWorkspaceSweepIntervalMs ?? ROOT_WORKSPACE_SWEEP_INTERVAL_MS)
+    : undefined;
+  sweepTimer?.unref?.();
 
   async function publishSessionStarted(session: WorkspaceSessionView): Promise<void> {
     try {
@@ -207,30 +345,53 @@ export function createWorkspaceSessionOrchestrator(options: {
       const sessionId = request.sessionId ?? idGenerator();
       let sandbox: AgentLaunchSandbox | undefined;
       let effectiveRequest = request;
+      let ownsRootWorkspace = false;
 
       if (request.agent === "codex" || request.agent === "claude") {
-        if (!request.projectSlug) {
-          return failure(400, "sandbox_unavailable", "Agent sandbox is unavailable");
+        let workspacePath: string;
+        let resolvedWorktreeId: string | undefined;
+        if (request.projectSlug) {
+          const workspaceRoot = await resolveAgentWorkspaceRoot(
+            options.projectManager,
+            options.worktreeManager,
+            input.ownerScope,
+            request.projectSlug,
+            request.worktreeId,
+          );
+          if (!workspaceRoot.ok) return workspaceRoot;
+          workspacePath = workspaceRoot.path;
+          resolvedWorktreeId = workspaceRoot.worktreeId;
+        } else {
+          if (!prepareRootWorkspace) {
+            return failure(503, "sandbox_unavailable", "Agent sandbox is unavailable");
+          }
+          try {
+            workspacePath = await prepareRootWorkspace(sessionId);
+          } catch (error: unknown) {
+            console.warn(
+              "[workspace-session-orchestrator] Root Chat workspace setup failed:",
+              error instanceof Error ? error.name : "UnknownError",
+            );
+            return failure(503, "sandbox_unavailable", "Agent sandbox is unavailable");
+          }
         }
-        const workspaceRoot = await resolveAgentWorkspaceRoot(
-          options.projectManager,
-          options.worktreeManager,
-          input.ownerScope,
-          request.projectSlug,
-          request.worktreeId,
-        );
-        if (!workspaceRoot.ok) return workspaceRoot;
-        effectiveRequest = workspaceRoot.worktreeId
-          ? { ...request, worktreeId: workspaceRoot.worktreeId }
-          : request;
+        ownsRootWorkspace = !request.projectSlug;
+        effectiveRequest = {
+          ...request,
+          ...(resolvedWorktreeId ? { worktreeId: resolvedWorktreeId } : {}),
+          ...(!request.projectSlug ? { workspaceRoot: workspacePath } : {}),
+        };
         const preflight = await resolveAgentSandbox({
           agentSandbox: options.agentSandbox,
           agent: request.agent,
           request: effectiveRequest,
           sessionId,
-          workspacePath: workspaceRoot.path,
+          workspacePath,
         });
-        if (!preflight.ok) return preflight;
+        if (!preflight.ok) {
+          if (ownsRootWorkspace) await cleanupRootWorkspace?.(sessionId);
+          return preflight;
+        }
         sandbox = preflight.sandbox;
       }
 
@@ -242,6 +403,7 @@ export function createWorkspaceSessionOrchestrator(options: {
       });
       if (!result.ok) {
         if (sandbox) await cleanupSessionScratch(sessionId);
+        if (ownsRootWorkspace) await cleanupRootWorkspace?.(sessionId);
         return result;
       }
 
@@ -268,15 +430,24 @@ export function createWorkspaceSessionOrchestrator(options: {
     },
 
     async stopSession(sessionId: string) {
+      const existing = await options.agentSessionManager.getSession(sessionId);
       const result = await options.agentSessionManager.killSession(sessionId);
       if (!result.ok) return result;
       await cleanupSessionScratch(sessionId);
+      if (existing.ok && existing.session.kind === "agent" && !existing.session.projectSlug) {
+        await cleanupRootWorkspace?.(sessionId);
+      }
       await publishSessionStopped(result.session);
       return result;
     },
 
     async recoverSessions() {
       return options.agentSessionManager.listSessions({ status: "running" });
+    },
+
+    async close() {
+      if (sweepTimer) clearInterval(sweepTimer);
+      await sweepTask;
     },
   };
 }

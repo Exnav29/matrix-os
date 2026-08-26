@@ -121,7 +121,11 @@ describe("canonical Chat Provider catalog", () => {
       .toMatchObject({
         driverKind: "hermes",
         availability: "available",
-        setupActions: [],
+        setupActions: [{
+          id: "hermes_settings",
+          kind: "open_settings",
+          label: "Configure Hermes",
+        }],
         defaultSelection: {
           instanceId: "hermes_default",
           model: "anthropic:claude-opus-4-6",
@@ -150,25 +154,37 @@ describe("canonical Chat Provider catalog", () => {
     )).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: "claude_code_default",
-        availability: "unavailable",
+        availability: "setup_required",
         models: [],
+        setupActions: expect.arrayContaining([
+          expect.objectContaining({ id: "claude_install", kind: "foreground_terminal" }),
+          expect.objectContaining({ id: "claude_connect", kind: "foreground_terminal" }),
+        ]),
       }),
       expect.objectContaining({
         id: "opencode_default",
-        availability: "unavailable",
+        availability: "setup_required",
         models: [],
+        setupActions: expect.arrayContaining([
+          expect.objectContaining({ id: "opencode_install", kind: "foreground_terminal" }),
+          expect.objectContaining({ id: "opencode_connect", kind: "foreground_terminal" }),
+        ]),
       }),
       expect.objectContaining({
         id: "pi_default",
-        availability: "unavailable",
+        availability: "setup_required",
         models: [],
+        setupActions: expect.arrayContaining([
+          expect.objectContaining({ id: "pi_install", kind: "foreground_terminal" }),
+          expect.objectContaining({ id: "pi_connect", kind: "foreground_terminal" }),
+        ]),
       }),
     ]));
     expect(new Set(catalog.instances.map((instance) => instance.catalogRevision)))
       .toEqual(new Set([catalog.revision]));
   });
 
-  it("keeps Matrix Chat kernel readiness independent from messaging authentication", async () => {
+  it("fails a system harness closed until its own provider authentication is configured", async () => {
     const source: AgentRuntimeSource = async () => {
       const snapshot = await runtimeSource()();
       return {
@@ -187,11 +203,65 @@ describe("canonical Chat Provider catalog", () => {
     const hermes = (await service.getCatalog(principal)).instances
       .find((instance) => instance.id === "hermes_default")!;
 
-    expect(hermes.availability).toBe("available");
-    expect(hermes.defaultSelection?.model).toBe("anthropic:claude-opus-4-6");
-    expect(hermes.models).toEqual(expect.arrayContaining([
-      expect.objectContaining({ availability: "available" }),
+    expect(hermes.availability).toBe("auth_required");
+    expect(hermes.defaultSelection).toBeUndefined();
+    expect(hermes.models).toEqual([]);
+    expect(hermes.options).toEqual([]);
+  });
+
+  it("restores visible Terminal setup actions when an unavailable coding Provider omits them", async () => {
+    const service = createChatProviderCatalogService({
+      codingProviders: codingRegistry([codingProvider({
+        id: "opencode",
+        displayName: "OpenCode",
+        kind: "opencode",
+        availability: "unavailable",
+        installStatus: "installed",
+        authStatus: "unknown",
+        defaultModel: undefined,
+        setupActions: [],
+      })]),
+      agentRuntimeSource: runtimeSource(),
+    });
+
+    const opencode = (await service.getCatalog(principal)).instances
+      .find((instance) => instance.id === "opencode_default")!;
+
+    expect(opencode.models).toEqual([]);
+    expect(opencode.setupActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "opencode_install", kind: "foreground_terminal" }),
+      expect.objectContaining({ id: "opencode_connect", kind: "foreground_terminal" }),
     ]));
+  });
+
+  it("does not advertise an installed harness without a canonical execution adapter", async () => {
+    const service = createChatProviderCatalogService({
+      codingProviders: codingRegistry([codingProvider({
+        id: "opencode",
+        displayName: "OpenCode",
+        kind: "opencode",
+        defaultModel: "provider-model",
+      })]),
+      agentRuntimeSource: runtimeSource(),
+      executableDriverKinds: ["hermes", "codex", "claude_code"],
+    });
+
+    const catalog = await service.getCatalog(principal);
+    const opencode = catalog.instances.find((instance) => instance.id === "opencode_default")!;
+    const openclaw = catalog.instances.find((instance) => instance.id === "openclaw_default")!;
+
+    expect(opencode).toMatchObject({
+      availability: "unavailable",
+      models: [],
+      options: [],
+      setupActions: [],
+    });
+    expect(openclaw).toMatchObject({
+      availability: "unavailable",
+      models: [],
+      options: [],
+      setupActions: [],
+    });
   });
 
   it("uses the authenticated harness model catalog instead of a generic Provider default", async () => {
@@ -234,6 +304,76 @@ describe("canonical Chat Provider catalog", () => {
     expect(codex.options[0]).toMatchObject({ id: "effort", values: [{ value: "low" }, { value: "high" }] });
   });
 
+  it("publishes real Claude models and only options the Claude runner accepts", async () => {
+    const service = createChatProviderCatalogService({
+      codingProviders: codingRegistry([codingProvider({
+        id: "claude",
+        displayName: "Claude",
+        kind: "claude",
+        defaultModel: undefined,
+      })]),
+      agentRuntimeSource: runtimeSource(),
+    });
+
+    const claude = (await service.getCatalog(principal)).instances
+      .find((instance) => instance.id === "claude_code_default")!;
+
+    expect(claude.models.map((model) => model.id)).toEqual([
+      "default",
+      "opus",
+      "sonnet",
+    ]);
+    expect(claude.models.map((model) => model.displayName)).toEqual([
+      "Claude default",
+      "Claude Opus",
+      "Claude Sonnet",
+    ]);
+    expect(claude.models.some((model) => model.id === "provider-default")).toBe(false);
+    expect(claude.options).toMatchObject([{
+      id: "effort",
+      values: [
+        { value: "low" },
+        { value: "medium" },
+        { value: "high" },
+        { value: "max" },
+      ],
+    }]);
+    expect(claude.supports.permissionModes).toEqual([
+      "supervised",
+      "auto_accept_edits",
+      "auto",
+      "full_access",
+    ]);
+  });
+
+  it("hides unsupported Hermes effort and permission choices", async () => {
+    const service = createChatProviderCatalogService({
+      codingProviders: codingRegistry(),
+      agentRuntimeSource: runtimeSource(),
+    });
+
+    const hermes = (await service.getCatalog(principal)).instances
+      .find((instance) => instance.id === "hermes_default")!;
+
+    expect(hermes.options).toEqual([]);
+    expect(hermes.supports.permissionModes).toEqual(["full_access"]);
+  });
+
+  it("invalidates both live inventories before an explicit refresh", async () => {
+    const registry = codingRegistry();
+    const source = runtimeSource();
+    source.invalidate = vi.fn();
+    const service = createChatProviderCatalogService({
+      codingProviders: registry,
+      agentRuntimeSource: source,
+    });
+
+    await service.refresh(principal);
+
+    expect(registry.invalidate).toHaveBeenCalledWith(principal.userId);
+    expect(source.invalidate).toHaveBeenCalledOnce();
+  });
+
   it("fails closed per readiness source without hiding the healthy domain", async () => {
     const failingRuntime: AgentRuntimeSource = async () => {
       throw new Error("secret runtime endpoint failed");
@@ -247,17 +387,14 @@ describe("canonical Chat Provider catalog", () => {
 
     expect(catalog.instances.find((instance) => instance.id === "codex_default")?.availability)
       .toBe("available");
-    expect(catalog.instances.find((instance) => instance.driverKind === "hermes"))
-      .toMatchObject({
-        availability: "available",
-        models: expect.arrayContaining([expect.objectContaining({ id: "anthropic:claude-opus-4-6" })]),
-      });
+    expect(catalog.instances.find((instance) => instance.driverKind === "hermes")?.availability)
+      .toBe("unavailable");
     expect(catalog.instances.find((instance) => instance.driverKind === "openclaw")?.availability)
       .toBe("unavailable");
     expect(JSON.stringify(catalog)).not.toContain("secret runtime endpoint");
   });
 
-  it("keeps the Matrix Chat kernel catalog separate from external Hermes messaging models", async () => {
+  it("uses only the authenticated Hermes provider/model inventory", async () => {
     const messagingOnly: AgentRuntimeSource = async () => {
       const snapshot = await runtimeSource()(AbortSignal.timeout(1_000));
       return {
@@ -289,13 +426,8 @@ describe("canonical Chat Provider catalog", () => {
     const hermes = (await service.getCatalog(principal)).instances
       .find((instance) => instance.id === "hermes_default")!;
 
-    expect(hermes.models.map((model) => model.id)).toEqual([
-      "anthropic:claude-opus-4-6",
-      "anthropic:claude-sonnet-4-5",
-      "anthropic:claude-haiku-4-5",
-    ]);
-    expect(hermes.defaultSelection?.model).toBe("anthropic:claude-opus-4-6");
-    expect(JSON.stringify(hermes)).not.toContain("gpt-5");
+    expect(hermes.models.map((model) => model.id)).toEqual(["openai:gpt-5"]);
+    expect(hermes.defaultSelection?.model).toBe("openai:gpt-5");
   });
 
   it("keeps the active system runtime when coding inventory fails", async () => {
@@ -319,6 +451,11 @@ describe("canonical Chat Provider catalog", () => {
       || instance.driverKind === "opencode"
       || instance.driverKind === "pi")
       .every((instance) => instance.availability === "unavailable")).toBe(true);
+    expect(catalog.instances.filter((instance) => instance.driverKind === "codex"
+      || instance.driverKind === "claude_code"
+      || instance.driverKind === "opencode"
+      || instance.driverKind === "pi")
+      .every((instance) => instance.setupActions.length === 0)).toBe(true);
     expect(JSON.stringify(catalog)).not.toContain("secret coding inventory failure");
   });
 
@@ -497,6 +634,20 @@ describe("GET /api/chat-providers", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(catalog);
     expect(getCatalog).toHaveBeenCalledWith(principal);
+  });
+
+  it("refreshes cached provider auth when requested", async () => {
+    const catalog = selectionCatalog();
+    const refresh = vi.fn(async () => catalog);
+    const app = new Hono().route("/", createChatProviderRoutes({
+      catalog: { getCatalog: vi.fn(async () => catalog), refresh },
+      getPrincipal: () => principal,
+    }));
+
+    const response = await app.request("/api/chat-providers?refresh=true");
+
+    expect(response.status).toBe(200);
+    expect(refresh).toHaveBeenCalledWith(principal);
   });
 
   it("returns a generic service error when catalog projection fails", async () => {

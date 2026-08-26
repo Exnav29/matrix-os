@@ -141,7 +141,7 @@ function runningStatusFor(session: { runtime?: { status?: unknown } | null }): "
   return session.runtime?.status === "starting" ? "starting" : "running";
 }
 
-function workspaceTurnInput(
+function workspaceTurnPrompt(
   message: string,
   attachments: Parameters<NonNullable<CodingAgentProviderAdapter["resumeTurn"]>>[0]["turn"]["attachments"],
 ): string {
@@ -154,7 +154,21 @@ function workspaceTurnInput(
   if (Buffer.byteLength(body, "utf-8") > 64 * 1024) {
     throw new Error("Workspace provider input is too large");
   }
-  return `matrix-turn-v1:${Buffer.from(body, "utf-8").toString("base64")}\r`;
+  return body;
+}
+
+function workspaceTurnInput(
+  message: string,
+  attachments: Parameters<NonNullable<CodingAgentProviderAdapter["resumeTurn"]>>[0]["turn"]["attachments"],
+  model: Parameters<NonNullable<CodingAgentProviderAdapter["resumeTurn"]>>[0]["turn"]["model"],
+  modelOptions: Parameters<NonNullable<CodingAgentProviderAdapter["resumeTurn"]>>[0]["turn"]["modelOptions"],
+): string {
+  const body = workspaceTurnPrompt(message, attachments);
+  const payload = JSON.stringify({ prompt: body, model, modelOptions: modelOptions ?? [] });
+  if (Buffer.byteLength(payload, "utf-8") > 66 * 1024) {
+    throw new Error("Workspace provider input is too large");
+  }
+  return `matrix-turn-v2:${Buffer.from(payload, "utf-8").toString("base64")}\r`;
 }
 
 function statusEvent(input: {
@@ -243,6 +257,8 @@ export function createWorkspaceCodingAgentProvider(
             agent,
             prompt: request.prompt,
             attachments: request.attachments,
+            model: request.model,
+            modelOptions: request.modelOptions,
             projectSlug: request.projectId,
             taskId: request.taskId,
             worktreeId: request.worktreeId,
@@ -281,8 +297,8 @@ export function createWorkspaceCodingAgentProvider(
         resumeState: { conversationId: sessionId },
       };
     },
-    async resumeTurn({ thread, turn, resumeState, signal }) {
-      if (!runnable || !options.runtime.sendInput) {
+    async resumeTurn({ principal, thread, turn, resumeState, signal }) {
+      if (!runnable) {
         throw new Error("Workspace provider turn resume unavailable");
       }
       const sessionId = sessionIdForThread(thread.id);
@@ -290,9 +306,31 @@ export function createWorkspaceCodingAgentProvider(
         throw new Error("Workspace provider conversation mismatch");
       }
       signal.throwIfAborted();
+      if (agent === "codex" && options.codexControl) {
+        if (!options.codexEvents) {
+          throw new Error("Codex structured events are unavailable");
+        }
+        await options.codexEvents.watch({
+          principal,
+          threadId: thread.id,
+          sessionId,
+          startAtEnd: true,
+        });
+        await options.codexControl.submitTurn({
+          sessionId,
+          turnId: turn.turnId,
+          prompt: workspaceTurnPrompt(turn.message, turn.attachments),
+          ...(turn.model ? { model: turn.model } : {}),
+          modelOptions: turn.modelOptions ?? [],
+        });
+        return { events: [], outcome: "delivered", resumeState };
+      }
+      if (!options.runtime.sendInput) {
+        throw new Error("Workspace provider turn resume unavailable");
+      }
       const result = await options.runtime.sendInput(
         sessionId,
-        workspaceTurnInput(turn.message, turn.attachments),
+        workspaceTurnInput(turn.message, turn.attachments, turn.model, turn.modelOptions),
         signal,
       );
       if (!result.ok) throw new Error("Workspace provider turn resume failed");

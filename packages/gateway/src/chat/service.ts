@@ -7,9 +7,11 @@ import {
   CanonicalChatRecordSchema,
   CanonicalChatRunCancellationResponseSchema,
   CanonicalChatRunAdmissionResponseSchema,
+  CanonicalChatSafeErrorSchema,
   CanonicalChatTurnAdmissionResponseSchema,
   CanonicalCreateChatTurnRequestSchema,
   CanonicalRetryChatTurnRequestSchema,
+  CanonicalUpdateChatProjectRequestSchema,
   CanonicalCreateChatRequestSchema,
   type CanonicalChatDetailResponse,
   type CanonicalChatListResponse,
@@ -21,13 +23,15 @@ import {
   type CanonicalCreateChatRequest,
   type CanonicalCreateChatTurnRequest,
   type CanonicalRetryChatTurnRequest,
+  type CanonicalUpdateChatProjectRequest,
 } from "@matrix-os/contracts";
 import { z } from "zod/v4";
 import type { ChatOwner } from "./records.js";
 import type { ChatRepository } from "./repository.js";
 import type { CanonicalChatRouteService } from "./routes.js";
 import type { RequestPrincipal } from "../request-principal.js";
-import type { CanonicalChatOrchestrator } from "./orchestrator.js";
+import { ChatExecutionRootError, type ChatExecutionRootResolver } from "./execution-root.js";
+import { CanonicalChatOrchestrationError, type CanonicalChatOrchestrator } from "./orchestrator.js";
 
 const CursorEnvelopeSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -45,7 +49,7 @@ const CursorEnvelopeSchema = z.discriminatedUnion("kind", [
 ]);
 
 type CursorEnvelope = z.infer<typeof CursorEnvelopeSchema>;
-type ChatServiceRepository = Pick<ChatRepository, "create" | "list" | "getDetailPage">;
+type ChatServiceRepository = Pick<ChatRepository, "create" | "update" | "hardDelete" | "list" | "search" | "getDetailPage">;
 
 function encodeCursor(value: CursorEnvelope): string {
   return CanonicalChatApiCursorSchema.parse(
@@ -84,7 +88,10 @@ function decodeMessageCursor(value: string, chatId: string): number {
 
 export function createCanonicalChatService(
   repository: ChatServiceRepository,
-  options: { orchestrator?: Pick<CanonicalChatOrchestrator, "admitTurn" | "cancelRun" | "retryTurn"> } = {},
+  options: {
+    orchestrator?: Pick<CanonicalChatOrchestrator, "admitTurn" | "cancelRun" | "retryTurn">;
+    executionRoots?: Pick<ChatExecutionRootResolver, "resolve">;
+  } = {},
 ): CanonicalChatRouteService {
   return {
     async create(owner: ChatOwner, input: CanonicalCreateChatRequest): Promise<CanonicalChatRecord> {
@@ -97,6 +104,51 @@ export function createCanonicalChatService(
         ...(request.currentSelection === undefined ? {} : { currentSelection: request.currentSelection }),
       });
       return CanonicalChatRecordSchema.parse(created);
+    },
+
+    async updateProject(
+      owner: ChatOwner,
+      chatId: string,
+      input: CanonicalUpdateChatProjectRequest,
+    ): Promise<CanonicalChatRecord> {
+      const request = CanonicalUpdateChatProjectRequestSchema.parse(input);
+      if (request.projectId !== null) {
+        if (!options.executionRoots) {
+          throw new CanonicalChatOrchestrationError(CanonicalChatSafeErrorSchema.parse({
+            code: "project_unavailable",
+            safeMessage: "The Project workspace is unavailable.",
+            retryable: true,
+            recoveryActions: ["retry"],
+          }), 503);
+        }
+        try {
+          await options.executionRoots.resolve(owner, {
+            kind: "project",
+            projectId: request.projectId,
+          });
+        } catch (error: unknown) {
+          if (!(error instanceof ChatExecutionRootError)) throw error;
+          const retryable = error.code === "validation_unavailable";
+          throw new CanonicalChatOrchestrationError(CanonicalChatSafeErrorSchema.parse({
+            code: "project_unavailable",
+            safeMessage: "The Project workspace is unavailable.",
+            retryable,
+            ...(retryable ? { recoveryActions: ["retry"] as const } : {}),
+          }), retryable ? 503 : 409);
+        }
+      }
+      return CanonicalChatRecordSchema.parse(await repository.update(
+        owner,
+        CanonicalChatIdSchema.parse(chatId),
+        request,
+      ));
+    },
+
+    async delete(owner, chatId, clientRequestId) {
+      return repository.hardDelete(owner, {
+        chatId: CanonicalChatIdSchema.parse(chatId),
+        clientRequestId: z.string().trim().min(1).max(128).parse(clientRequestId),
+      });
     },
 
     async list(owner, input): Promise<CanonicalChatListResponse> {
@@ -116,6 +168,17 @@ export function createCanonicalChatService(
             chatId: page.nextCursor.chatId,
           }),
         }),
+      });
+    },
+
+    async search(owner, input): Promise<CanonicalChatListResponse> {
+      return CanonicalChatListResponseSchema.parse({
+        items: await repository.search(
+          owner,
+          input.query,
+          input.limit,
+          input.projectId,
+        ),
       });
     },
 
@@ -199,7 +262,10 @@ export function createUnavailableCanonicalChatService(): CanonicalChatRouteServi
   };
   return {
     create: unavailable,
+    updateProject: unavailable,
+    delete: unavailable,
     list: unavailable,
+    search: unavailable,
     getDetail: unavailable,
     admitTurn: unavailable,
     cancelRun: unavailable,

@@ -97,6 +97,8 @@ const StoredThreadSchema = AgentThreadSummarySchema.extend({
 const StoredTurnSchema = z.object({
   message: CreateAgentTurnRequestSchema.shape.message.optional(),
   attachments: CreateAgentTurnRequestSchema.shape.attachments,
+  model: CreateAgentTurnRequestSchema.shape.model,
+  modelOptions: CreateAgentTurnRequestSchema.shape.modelOptions,
   clientRequestId: CreateAgentTurnRequestSchema.shape.clientRequestId,
   ownerId: OwnerIdSchema,
   threadId: AgentThreadSummarySchema.shape.id,
@@ -1205,7 +1207,6 @@ export function createCodingAgentThreadStore(
     },
     async acceptTurn(principal, threadId, request) {
       const relationValidator = options.relationValidator?.validateThread;
-      if (!relationValidator) throw new CodingAgentTurnError("turn_unavailable");
       const reservation = turnDispatcher.reserve();
       if (!reservation) {
         const duplicate = await persistedDuplicateTurn(principal, threadId, request.clientRequestId);
@@ -1243,7 +1244,10 @@ export function createCodingAgentThreadStore(
           if (!["running", "completed", "failed", "aborted"].includes(thread.status)) {
             throw new CodingAgentTurnError("turn_unavailable");
           }
-          await relationValidator(principal, { projectId: thread.projectId, taskId: thread.taskId });
+          if (thread.projectId !== undefined || thread.taskId !== undefined) {
+            if (!relationValidator) throw new CodingAgentTurnError("turn_unavailable");
+            await relationValidator(principal, { projectId: thread.projectId, taskId: thread.taskId });
+          }
           const provider = providerFor(thread.providerId);
           if (!provider.resumeTurn || !thread.providerResumeState) {
             throw new CodingAgentTurnError("turn_unavailable");
@@ -1318,6 +1322,8 @@ export function createCodingAgentThreadStore(
               ...(result.dispatch.turn.attachments
                 ? { attachments: result.dispatch.turn.attachments }
                 : {}),
+              ...(result.dispatch.turn.model ? { model: result.dispatch.turn.model } : {}),
+              ...(result.dispatch.turn.modelOptions ? { modelOptions: result.dispatch.turn.modelOptions } : {}),
             },
           });
         } else {
