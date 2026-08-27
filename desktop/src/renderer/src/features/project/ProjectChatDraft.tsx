@@ -71,6 +71,7 @@ export function ProjectChatDraft({
   canonicalProjectId = projectId,
   onCanonicalCreated,
   presentation = "hero",
+  heroHeadline,
 }: {
   summary: RuntimeSummary;
   projectId: string;
@@ -84,6 +85,7 @@ export function ProjectChatDraft({
   canonicalProjectId?: string;
   onCanonicalCreated?: (chatId: string, label: string) => void;
   presentation?: "hero" | "landing";
+  heroHeadline?: string;
 }) {
   const preferredProviderId = useProviderPreferences((s) => s.defaultProviderId);
   const composerSelections = useProviderPreferences((s) => s.composerSelections);
@@ -391,6 +393,7 @@ export function ProjectChatDraft({
       {presentation === "hero" ? (
         <ProjectChatHero
           projectLabel={projectLabel}
+          headline={heroHeadline}
           suggestionsVisible={canCreate && promptEmpty}
           typeToStartEnabled={typeToStartEnabled}
           onSuggestion={(prompt) => {
@@ -400,7 +403,7 @@ export function ProjectChatDraft({
         />
       ) : null}
       <div className={`shrink-0 ${presentation === "landing" ? "" : "px-6 pb-5"}`}>
-        <div className={`mx-auto w-full ${presentation === "landing" ? "max-w-none" : "max-w-[46rem]"}`} data-slot="draft-composer">
+        <div className={`@container/project-composer mx-auto w-full ${presentation === "landing" ? "max-w-none" : "max-w-[46rem]"}`} data-slot="draft-composer">
           {canonicalError || createError ? (
             <p className="mb-1 px-1 text-xs" style={{ color: "var(--danger)" }}>{canonicalError ?? createError}</p>
           ) : null}
@@ -467,9 +470,14 @@ export function ProjectChatDraft({
                   ariaLabel="Message new chat"
                   placeholder={presentation === "landing" ? "How can I help you today?" : "Ask the agent to do anything…"}
                   leadingControls={(
-                    <span className="flex h-8 min-w-0 items-center gap-1.5 rounded-lg px-2 text-sm" style={{ color: "var(--text-secondary)" }}>
-                      <FolderOpen size={14} aria-hidden />
-                      <span className="max-w-40 truncate">{projectLabel}</span>
+                    <span
+                      aria-label={`Project folder ${projectLabel}`}
+                      title={projectLabel}
+                      className="flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2 text-sm"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      <FolderOpen size={14} aria-hidden className="shrink-0" />
+                      <span className="hidden max-w-40 truncate @min-[36rem]/project-composer:inline">{projectLabel}</span>
                     </span>
                   )}
               />

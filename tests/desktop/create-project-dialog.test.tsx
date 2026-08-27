@@ -14,12 +14,12 @@ import { useTabs } from "../../desktop/src/renderer/src/stores/tabs";
 describe("CreateProjectDialog", () => {
   function openFolders() {
     fireEvent.change(screen.getByLabelText("What are you working on?"), { target: { value: "Temporary" } });
-    fireEvent.click(screen.getByRole("button", { name: /Folders/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Existing folder/ }));
   }
 
   function openNewFolder() {
-    openFolders();
-    fireEvent.click(screen.getByRole("button", { name: /New folder in Projects/ }));
+    fireEvent.change(screen.getByLabelText("What are you working on?"), { target: { value: "Temporary" } });
+    fireEvent.click(screen.getByRole("button", { name: /New folder/ }));
   }
 
   beforeEach(() => {
@@ -52,15 +52,16 @@ describe("CreateProjectDialog", () => {
     expect(screen.getAllByText("Create a project")).toHaveLength(2);
     expect(screen.getByLabelText("What are you working on?")).toBeTruthy();
     expect(screen.getByLabelText("What are you trying to achieve?")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Folders/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Existing folder/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Clone from GitHub/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /New folder/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Create project" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("opens the folder and GitHub source flows directly from their cards", () => {
     render(<Tooltip.Provider><CreateProjectDialog open onClose={vi.fn()} /></Tooltip.Provider>);
 
-    fireEvent.click(screen.getByRole("button", { name: /Folders/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Existing folder/ }));
     expect(screen.getByText("Connect an existing folder")).toBeTruthy();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Back" })[0]!);

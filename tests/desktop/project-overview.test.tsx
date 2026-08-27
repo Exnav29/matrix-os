@@ -94,6 +94,7 @@ describe("ProjectOverview", () => {
 
     expect(screen.getByText("Loading project workspace…")).toBeTruthy();
     expect(screen.getByText("Fetching chat and workspace capabilities from this Matrix computer.")).toBeTruthy();
+    expect(screen.queryByText("What should we build today?")).toBeNull();
   });
 
   it("shows application-owned copy instead of a raw workspace error", () => {
@@ -120,6 +121,31 @@ describe("ProjectOverview", () => {
 
     expect(screen.getByText("Project sessions are unavailable.")).toBeTruthy();
     expect(screen.queryByText(/postgres failed/)).toBeNull();
+    expect(screen.queryByText("What should we build today?")).toBeNull();
+  });
+
+  it("shows the Figma empty Project hero and four starter actions only when the workspace is ready", () => {
+    render(
+      <ProjectOverview
+        projectId="matrix-os"
+        projectLabel="Matrix OS"
+        summary={summaryWithProjectComposer()}
+        active={false}
+        viewSwitch={null}
+      />,
+    );
+
+    expect(screen.getByText("What should we build today?")).toBeTruthy();
+    for (const action of [
+      "Explore and understand code",
+      "Build a new feature, app, or tool",
+      "Review code and suggest changes",
+      "Fix issues and failures",
+    ]) {
+      expect(screen.getByRole("button", { name: action })).toBeTruthy();
+    }
+    expect(screen.queryByText("Loading project workspace…")).toBeNull();
+    expect(screen.queryByText("Project sessions are unavailable.")).toBeNull();
   });
 
   it("bounds the rendered recent-session collection", () => {
@@ -241,6 +267,80 @@ describe("ProjectOverview", () => {
     expect(useProjectView.getState().viewFor("matrix-os")).toBe("chats");
     expect(useTabs.getState().tabs.find((tab) => tab.projectSlug === "matrix-os")?.chatId)
       .toBe(snapshot.chat.id);
+  });
+
+  it("keeps canonical Project Chats when the Project window moves behind another window", async () => {
+    const { snapshot } = createCanonicalChatFixture("completed");
+    const canonicalRecord = {
+      chat: {
+        id: snapshot.chat.id,
+        ownerScope: snapshot.chat.ownerScope,
+        title: "Canonical project investigation",
+        lifecycle: snapshot.chat.lifecycle,
+        attention: snapshot.chat.attention,
+        revision: snapshot.chat.revision,
+        messageCount: snapshot.chat.messageCount,
+        lastMessagePreview: snapshot.chat.lastMessagePreview,
+        currentSelection: snapshot.chat.currentSelection,
+        createdAt: snapshot.chat.createdAt,
+        updatedAt: snapshot.chat.updatedAt,
+      },
+      projectId: "matrix-os",
+      providerBinding: snapshot.chat.providerBinding,
+    };
+    useConnection.setState({
+      status: "signed-in",
+      api: {
+        baseUrl: "https://matrix.test",
+        get: vi.fn(async (path: string) => {
+          if (path === "/api/chats?limit=100&projectId=matrix-os") return { items: [canonicalRecord] };
+          if (path === "/api/conversations") return { conversations: [] };
+          throw new Error(`unexpected api path ${path}`);
+        }),
+      } as never,
+    });
+
+    const view = render(
+      <ProjectOverview
+        projectId="matrix-os"
+        projectLabel="Matrix OS"
+        summary={summaryWithThreads([{ ...thread(1), title: "Coding agent run" }])}
+        active
+        viewSwitch={null}
+      />,
+    );
+
+    await screen.findByRole("button", { name: "Open chat Canonical project investigation" });
+    view.rerender(
+      <ProjectOverview
+        projectId="matrix-os"
+        projectLabel="Matrix OS"
+        summary={summaryWithThreads([{ ...thread(1), title: "Coding agent run" }])}
+        active={false}
+        viewSwitch={null}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Open chat Canonical project investigation" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Open session Coding agent run" })).toBeNull();
+    });
+  });
+
+  it("keeps the Project folder context affordance available in compact windows", () => {
+    render(
+      <div style={{ width: 320 }}>
+        <ProjectOverview
+          projectId="matrix-os"
+          projectLabel="Matrix OS"
+          summary={summaryWithProjectComposer()}
+          active={false}
+          viewSwitch={null}
+        />
+      </div>,
+    );
+
+    expect(screen.getByLabelText("Project folder Matrix OS")).toBeTruthy();
   });
 
   it("shows a safe canonical-list error instead of silently falling back to legacy sessions", async () => {
