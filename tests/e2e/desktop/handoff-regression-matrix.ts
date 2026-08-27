@@ -87,6 +87,10 @@ const COMMON_STATE_REQUIREMENTS: readonly HandoffRequirement[] = [
   "bounded-errors",
 ];
 
+const TERMINAL_STATE_REQUIREMENTS = COMMON_STATE_REQUIREMENTS.filter(
+  (requirement) => requirement !== "search-empty",
+);
+
 const IDENTITY_REQUIREMENTS: readonly HandoffRequirement[] = [
   "runtime-switch",
   "auth-replacement",
@@ -353,14 +357,24 @@ export const HANDOFF_REGRESSION_MATRIX: readonly HandoffRegressionScenario[] = [
     ],
     figmaNode: "67:5290",
     requirements: [
-      ...COMMON_STATE_REQUIREMENTS,
+      ...TERMINAL_STATE_REQUIREMENTS,
       "active",
       "idle",
       "waiting",
       "completed",
       "stopped",
     ],
-    assertion: "Session list and detail cover running, waiting, idle, ended, search, failure, and retry states.",
+    assertion: "Session list and detail cover running, waiting, idle, ended, failure, and retry states.",
+  },
+  {
+    id: "terminal-search-empty",
+    surface: "terminal",
+    owner: "MAT-300",
+    execution: "dependency",
+    verification: "deferred",
+    requirements: ["search-empty"],
+    assertion: "Terminal search-empty behavior needs an explicit disposition while the OS View sidebar has no search control.",
+    note: "The current OS View Terminal sidebar intentionally omits search; search-empty validation is deferred until search returns or the handoff requirement is retired.",
   },
   {
     id: "terminal-accessibility",
@@ -371,11 +385,11 @@ export const HANDOFF_REGRESSION_MATRIX: readonly HandoffRegressionScenario[] = [
     evidence: [
       testEvidence(
         "tests/desktop/terminals-tab.test.tsx",
-        "keeps secondary row actions in an accessible overflow menu",
+        "keeps the OS View sidebar delete action accessible",
       ),
       testEvidence(
         "tests/desktop/terminals-tab.test.tsx",
-        "uses the Figma list toolbar and reveals a bounded search-empty state",
+        "uses the Figma sidebar toolbar without legacy list controls",
       ),
     ],
     figmaNode: "67:5290",
