@@ -127,12 +127,54 @@ describe("desktop surfaces store", () => {
     useDesktopSurfaces.getState().maximizeToTab("terminal");
     expect(useDesktopSurfaces.getState().workspaceView).toBe("tabs");
 
-    useDesktopSurfaces.getState().showDesktop();
+    useDesktopSurfaces.getState().setWorkspaceView("desktop");
     expect(useDesktopSurfaces.getState().workspaceView).toBe("desktop");
     expect(useDesktopSurfaces.getState().surfaces.terminal?.mode).toBe("tab");
 
     useDesktopSurfaces.getState().activateSurface("terminal");
     expect(useDesktopSurfaces.getState().workspaceView).toBe("tabs");
+  });
+
+  it("animates only floating windows while preserving full-screen tabs", () => {
+    useDesktopSurfaces.getState().reconcileTabs(["home", "chat"], { width: 1200, height: 760 });
+    useDesktopSurfaces.getState().maximizeToTab("chat");
+
+    useDesktopSurfaces.getState().showDesktop();
+    expect(useDesktopSurfaces.getState().desktopHiddenSurfaceIds).toEqual(["home"]);
+    expect(useDesktopSurfaces.getState().desktopTransition?.phase).toBe("hiding");
+    expect(useDesktopSurfaces.getState().surfaces.home?.mode).toBe("window");
+    expect(useDesktopSurfaces.getState().surfaces.chat?.mode).toBe("tab");
+
+    useDesktopSurfaces.getState().showDesktop();
+    expect(useDesktopSurfaces.getState().desktopHiddenSurfaceIds).toEqual([]);
+    expect(useDesktopSurfaces.getState().desktopTransition?.phase).toBe("restoring");
+    expect(useDesktopSurfaces.getState().surfaces.home?.mode).toBe("window");
+    expect(useDesktopSurfaces.getState().surfaces.chat?.mode).toBe("tab");
+  });
+
+  it("removes an activated window from the hidden desktop snapshot", () => {
+    useDesktopSurfaces.getState().reconcileTabs(["home", "chat"], { width: 1200, height: 760 });
+    useDesktopSurfaces.getState().showDesktop();
+
+    useDesktopSurfaces.getState().activateSurface("home");
+
+    expect(useDesktopSurfaces.getState().desktopHiddenSurfaceIds).toEqual(["chat"]);
+    expect(useDesktopSurfaces.getState().desktopTransition?.surfaceIds).toEqual(["chat"]);
+  });
+
+  it("removes closed and deleted windows from the hidden desktop snapshot", () => {
+    useDesktopSurfaces.getState().reconcileTabs(["home", "chat"], { width: 1200, height: 760 });
+    useDesktopSurfaces.getState().showDesktop();
+
+    useDesktopSurfaces.getState().closeSurface("home");
+    expect(useDesktopSurfaces.getState().desktopHiddenSurfaceIds).toEqual(["chat"]);
+
+    useDesktopSurfaces.getState().reconcileTabs(["chat"], { width: 1200, height: 760 });
+    expect(useDesktopSurfaces.getState().desktopHiddenSurfaceIds).toEqual(["chat"]);
+
+    useDesktopSurfaces.getState().reconcileTabs(["notes"], { width: 1200, height: 760 });
+    expect(useDesktopSurfaces.getState().desktopHiddenSurfaceIds).toEqual([]);
+    expect(useDesktopSurfaces.getState().desktopTransition).toBeNull();
   });
 
   it("returns to the desktop when a window is activated or the last tab surface disappears", () => {
