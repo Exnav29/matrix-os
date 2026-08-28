@@ -1829,8 +1829,9 @@ export async function createGateway(config: GatewayConfig) {
       },
       bind: async (principal: RequestPrincipal, input: {
         chatId: string;
-        runId: string;
+        runId?: string;
         sessionId: string;
+        sessionCreatedAt: string;
       }) => {
         if (!chatRepository || !canonicalChatExecutionRoots) {
           throw new Error("Chat terminal dependencies are unavailable");

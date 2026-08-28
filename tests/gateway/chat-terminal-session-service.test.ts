@@ -36,11 +36,21 @@ describe("Chat terminal session service", () => {
 
     await service.bind(
       { userId: "owner_test", source: "jwt" },
-      { chatId: "chat_selected", runId: "run_selected", sessionId: "chat-calm-otter" },
+      {
+        chatId: "chat_selected",
+        runId: "run_selected",
+        sessionId: "chat-calm-otter",
+        sessionCreatedAt: "2026-08-28T10:00:00.000Z",
+      },
     );
     expect(repository.bindTerminalSession).toHaveBeenCalledWith(
       { type: "personal", ownerId: "owner_test" },
-      { chatId: "chat_selected", runId: "run_selected", sessionId: "chat-calm-otter" },
+      {
+        chatId: "chat_selected",
+        runId: "run_selected",
+        sessionId: "chat-calm-otter",
+        sessionCreatedAt: "2026-08-28T10:00:00.000Z",
+      },
     );
   });
 
@@ -114,11 +124,19 @@ describe("Chat terminal session service", () => {
 
     await service.bind(
       { userId: "owner_test", source: "jwt" },
-      { chatId: "chat_empty_project", sessionId: "chat-draft-terminal" },
+      {
+        chatId: "chat_empty_project",
+        sessionId: "chat-draft-terminal",
+        sessionCreatedAt: "2026-08-28T10:05:00.000Z",
+      },
     );
     expect(repository.bindTerminalSession).toHaveBeenCalledWith(
       { type: "personal", ownerId: "owner_test" },
-      { chatId: "chat_empty_project", sessionId: "chat-draft-terminal" },
+      {
+        chatId: "chat_empty_project",
+        sessionId: "chat-draft-terminal",
+        sessionCreatedAt: "2026-08-28T10:05:00.000Z",
+      },
     );
   });
 });

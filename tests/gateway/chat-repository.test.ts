@@ -221,7 +221,7 @@ describe("ChatRepository", () => {
     ]);
   });
 
-  it("authorizes only exact owner, Chat, and terminal.bound JSON event matches", async () => {
+  it("keeps legacy terminal events visible without treating them as attachable incarnations", async () => {
     const created = await repository.create(owner, {
       id: "chat_terminal_owner",
       clientRequestId: "req_terminal_owner",
@@ -260,11 +260,11 @@ describe("ChatRepository", () => {
       .where("session_id", "=", "terminal_bound")
       .execute();
 
-    await expect(repository.hasTerminalBinding(owner, created.chat.id, "terminal_bound")).resolves.toBe(true);
-    await expect(repository.hasTerminalBinding(owner, created.chat.id, "terminal_decoy")).resolves.toBe(false);
-    await expect(repository.hasTerminalBinding(owner, created.chat.id, "terminal_wrong")).resolves.toBe(false);
-    await expect(repository.hasTerminalBinding(otherOwner, created.chat.id, "terminal_bound")).resolves.toBe(false);
-    await expect(repository.hasTerminalBinding(owner, "chat_missing", "terminal_bound")).resolves.toBe(false);
+    await expect(repository.getTerminalBinding(owner, created.chat.id, "terminal_bound")).resolves.toBeNull();
+    await expect(repository.getTerminalBinding(owner, created.chat.id, "terminal_decoy")).resolves.toBeNull();
+    await expect(repository.getTerminalBinding(owner, created.chat.id, "terminal_wrong")).resolves.toBeNull();
+    await expect(repository.getTerminalBinding(otherOwner, created.chat.id, "terminal_bound")).resolves.toBeNull();
+    await expect(repository.getTerminalBinding(owner, "chat_missing", "terminal_bound")).resolves.toBeNull();
     await expect(repository.listBoundTerminalSessionIds(owner, ["terminal_bound", "terminal_decoy", "terminal_manual"]))
       .resolves.toEqual(["terminal_bound"]);
     await expect(repository.listBoundTerminalSessionIds(otherOwner, ["terminal_bound"]))
@@ -806,13 +806,23 @@ describe("ChatRepository", () => {
       chatId: created.chat.id,
       runId: acceptedRun.id,
       sessionId: "chat-calm-otter",
+      sessionCreatedAt: "2026-08-28T10:00:00.000Z",
     })).resolves.toBe(true);
     await expect(repository.bindTerminalSession(owner, {
       chatId: created.chat.id,
       runId: acceptedRun.id,
       sessionId: "chat-calm-otter",
+      sessionCreatedAt: "2026-08-28T10:00:00.000Z",
     })).resolves.toBe(false);
-    await expect(repository.hasTerminalBinding(owner, created.chat.id, "chat-calm-otter")).resolves.toBe(true);
+    await expect(repository.bindTerminalSession(owner, {
+      chatId: created.chat.id,
+      runId: acceptedRun.id,
+      sessionId: "chat-calm-otter",
+      sessionCreatedAt: "2026-08-28T10:10:00.000Z",
+    })).resolves.toBe(true);
+    await expect(repository.getTerminalBinding(owner, created.chat.id, "chat-calm-otter")).resolves.toEqual({
+      sessionCreatedAt: "2026-08-28T10:10:00.000Z",
+    });
   });
 
   it("persists a terminal binding before the Chat has its first Run", async () => {
@@ -829,12 +839,16 @@ describe("ChatRepository", () => {
     await expect(repository.bindTerminalSession(owner, {
       chatId: created.chat.id,
       sessionId: "chat-draft-terminal",
+      sessionCreatedAt: "2026-08-28T10:05:00.000Z",
     })).resolves.toBe(true);
     await expect(repository.bindTerminalSession(owner, {
       chatId: created.chat.id,
       sessionId: "chat-draft-terminal",
+      sessionCreatedAt: "2026-08-28T10:05:00.000Z",
     })).resolves.toBe(false);
-    await expect(repository.hasTerminalBinding(owner, created.chat.id, "chat-draft-terminal")).resolves.toBe(true);
+    await expect(repository.getTerminalBinding(owner, created.chat.id, "chat-draft-terminal")).resolves.toEqual({
+      sessionCreatedAt: "2026-08-28T10:05:00.000Z",
+    });
     await expect(repository.listBoundTerminalSessionIds(owner, ["chat-draft-terminal", "manual-shell"]))
       .resolves.toEqual(["chat-draft-terminal"]);
 

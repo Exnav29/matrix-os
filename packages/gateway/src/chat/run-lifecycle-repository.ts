@@ -270,6 +270,7 @@ export class ChatRunLifecycleRepository {
             await trx.insertInto("chat_terminal_bindings").values({
               chat_id: chatId,
               session_id: activity.terminalSessionId,
+              session_created_at: null,
               run_id: runId,
               bound_at: activity.occurredAt,
             }).onConflict((conflict) => conflict.columns(["chat_id", "session_id"]).doUpdateSet({

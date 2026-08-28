@@ -45,6 +45,7 @@ interface ChatTerminalRoutes {
     chatId: string;
     runId?: string;
     sessionId: string;
+    sessionCreatedAt: string;
   }): Promise<void>;
 }
 
@@ -295,12 +296,18 @@ export function createShellRoutes(deps: ShellRouteDeps): Hono {
         typeof session === "object" && session !== null && "name" in session
           ? String((session as { name: unknown }).name)
           : body.name;
+      const sessionCreatedAt =
+        typeof session === "object" && session !== null && "createdAt" in session
+          ? z.iso.datetime().parse((session as { createdAt: unknown }).createdAt)
+          : null;
       if (body.chatId && principal && binding && deps.chatTerminals) {
         try {
+          if (!sessionCreatedAt) throw new Error("Chat terminal session incarnation unavailable");
           await deps.chatTerminals.bind(principal, {
             chatId: body.chatId,
             ...(binding.runId ? { runId: binding.runId } : {}),
             sessionId: name,
+            sessionCreatedAt,
           });
         } catch (error: unknown) {
           try {

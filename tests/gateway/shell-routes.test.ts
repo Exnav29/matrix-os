@@ -140,7 +140,10 @@ describe("gateway shell routes", () => {
   it("creates a Chat-bound session at the server-resolved root before exposing it", async () => {
     const registry = {
       list: vi.fn(async () => []),
-      create: vi.fn(async (input: { name: string }) => ({ name: input.name })),
+      create: vi.fn(async (input: { name: string }) => ({
+        name: input.name,
+        createdAt: "2026-08-28T10:00:00.000Z",
+      })),
       delete: vi.fn(async () => undefined),
     };
     const chatTerminals = {
@@ -170,14 +173,22 @@ describe("gateway shell routes", () => {
     });
     expect(chatTerminals.bind).toHaveBeenCalledWith(
       { userId: "user_a", source: "jwt" },
-      { chatId: "chat_selected", runId: "run_selected", sessionId: "chat-calm-otter" },
+      {
+        chatId: "chat_selected",
+        runId: "run_selected",
+        sessionId: "chat-calm-otter",
+        sessionCreatedAt: "2026-08-28T10:00:00.000Z",
+      },
     );
   });
 
   it("creates and binds a Chat terminal before the Chat has its first run", async () => {
     const registry = {
       list: vi.fn(async () => []),
-      create: vi.fn(async (input: { name: string }) => ({ name: input.name })),
+      create: vi.fn(async (input: { name: string }) => ({
+        name: input.name,
+        createdAt: "2026-08-28T10:00:00.000Z",
+      })),
       delete: vi.fn(async () => undefined),
     };
     const chatTerminals = {
@@ -202,7 +213,11 @@ describe("gateway shell routes", () => {
     });
     expect(chatTerminals.bind.mock.calls[0]).toStrictEqual([
       { userId: "user_a", source: "jwt" },
-      { chatId: "chat_empty", sessionId: "chat-new-draft" },
+      {
+        chatId: "chat_empty",
+        sessionId: "chat-new-draft",
+        sessionCreatedAt: "2026-08-28T10:00:00.000Z",
+      },
     ]);
   });
 

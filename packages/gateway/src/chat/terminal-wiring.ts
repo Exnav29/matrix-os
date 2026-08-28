@@ -1,9 +1,12 @@
 import { Hono, type Context } from "hono";
 import type { UpgradeWebSocket, WSEvents } from "hono/ws";
+import { CanonicalChatIdSchema } from "@matrix-os/contracts";
+import { z } from "zod/v4";
 import type { RequestPrincipal } from "../request-principal.js";
 import type { OwnerScope } from "../state-ops.js";
 import type { ShellRouteDeps } from "../shell/routes.js";
 import { createPendingTerminalInputQueue } from "../shell/pending-input.js";
+import { SESSION_NAME_PATTERN } from "../shell/names.js";
 import {
   shellWsMessageDataToString,
   type ShellWsOpenOptions,
@@ -14,7 +17,11 @@ import type { ChatOwner } from "./records.js";
 import { authorizeChatTerminalAttach } from "./terminal-authorization.js";
 
 type ChatTerminalRepository = {
-  hasTerminalBinding(owner: ChatOwner, chatId: string, sessionId: string): Promise<boolean>;
+  getTerminalBinding(
+    owner: ChatOwner,
+    chatId: string,
+    sessionId: string,
+  ): Promise<{ sessionCreatedAt: string | null } | null>;
   listBoundTerminalSessionIds(owner: ChatOwner, sessionIds: readonly string[]): Promise<readonly string[]>;
 };
 
@@ -46,6 +53,34 @@ function canonicalOwner(ownerScope: OwnerScope): ChatOwner {
     : { type: "personal", ownerId: ownerScope.id };
 }
 
+const SafeSequenceQuerySchema = z.string()
+  .regex(/^(0|[1-9]\d{0,15})$/)
+  .transform(Number)
+  .refine(Number.isSafeInteger);
+
+const TerminalSessionQuerySchema = z.object({
+  session: z.string().regex(SESSION_NAME_PATTERN),
+  chat: CanonicalChatIdSchema.optional(),
+  fromSeq: SafeSequenceQuerySchema.optional(),
+  client: z.enum(["hard", "soft"]).optional(),
+  cols: z.string().regex(/^[1-9]\d{0,2}$/).transform(Number).pipe(z.number().int().min(1).max(500)).optional(),
+  rows: z.string().regex(/^[1-9]\d{0,2}$/).transform(Number).pipe(z.number().int().min(1).max(200)).optional(),
+  lease: z.literal("exclusive").optional(),
+}).strict().superRefine((query, ctx) => {
+  if ((query.cols === undefined) !== (query.rows === undefined)) {
+    ctx.addIssue({ code: "custom", message: "Terminal dimensions must be paired" });
+  }
+}).transform((query) => ({
+  session: query.session,
+  ...(query.chat ? { chatId: query.chat } : {}),
+  fromSeq: query.fromSeq ?? 0,
+  ...(query.client ? { clientClass: query.client } : {}),
+  ...(query.cols !== undefined && query.rows !== undefined
+    ? { declaredSize: { cols: query.cols, rows: query.rows } }
+    : {}),
+  exclusiveLease: query.lease === "exclusive",
+}));
+
 export function parseTerminalSizingParams(
   query: (name: string) => string | undefined,
 ): { clientClass?: "hard" | "soft"; declaredSize?: { cols: number; rows: number } } {
@@ -71,18 +106,16 @@ function createTerminalSessionEvents<TRawSocket>(
     onUnexpectedSendFailure: (context: string, err: unknown) => void;
   },
 ): WSEvents<TRawSocket> {
-  const namedSession = c.req.query("session");
-  const chatId = c.req.query("chat");
-  const fromSeqParam = c.req.query("fromSeq");
-  const sizingParams = parseTerminalSizingParams((name) => c.req.query(name));
-  const exclusiveLease = c.req.query("lease") === "exclusive";
+  const terminalQuery = TerminalSessionQuerySchema.safeParse(
+    Object.fromEntries(new URL(c.req.url).searchParams.entries()),
+  );
   let namedHandle: ShellWsSession | null = null;
   let namedSocketClosed = false;
   const pendingInput = createPendingTerminalInputQueue();
 
   return {
     onOpen(_evt, ws) {
-      if (!namedSession) {
+      if (!terminalQuery.success) {
         ws.send(JSON.stringify({
           type: "error",
           code: "invalid_request",
@@ -91,9 +124,14 @@ function createTerminalSessionEvents<TRawSocket>(
         ws.close();
         return;
       }
-      const fromSeq = typeof fromSeqParam === "string" && /^\d+$/.test(fromSeqParam)
-        ? Number(fromSeqParam)
-        : 0;
+      const {
+        session: namedSession,
+        chatId,
+        fromSeq,
+        clientClass,
+        declaredSize,
+        exclusiveLease,
+      } = terminalQuery.data;
       void (async () => {
         const principal = deps.getPrincipal(c);
         if (!deps.repository) {
@@ -120,8 +158,8 @@ function createTerminalSessionEvents<TRawSocket>(
           ws: ws as unknown as ShellWsSocket,
           session: namedSession,
           fromSeq,
-          clientClass: sizingParams.clientClass,
-          declaredSize: sizingParams.declaredSize,
+          clientClass,
+          declaredSize,
           exclusiveLease,
         });
       })().then((session) => {

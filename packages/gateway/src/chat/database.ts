@@ -118,6 +118,7 @@ export interface ChatRunEventsTable {
 export interface ChatTerminalBindingsTable {
   chat_id: string;
   session_id: string;
+  session_created_at: string | null;
   run_id: string | null;
   bound_at: Timestamp;
 }
@@ -351,10 +352,15 @@ export async function bootstrapChatDatabase(db: Kysely<ChatDatabase>): Promise<v
     CREATE TABLE IF NOT EXISTS chat_terminal_bindings (
       chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
       session_id TEXT NOT NULL,
+      session_created_at TEXT,
       run_id TEXT REFERENCES chat_runs(id) ON DELETE SET NULL,
       bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (chat_id, session_id)
     )
+  `.execute(db);
+  await sql`
+    ALTER TABLE chat_terminal_bindings
+    ADD COLUMN IF NOT EXISTS session_created_at TEXT
   `.execute(db);
   await sql`
     CREATE INDEX IF NOT EXISTS idx_chat_terminal_bindings_session

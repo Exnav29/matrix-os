@@ -377,29 +377,25 @@ export class ChatRepository {
     return hydrateRecord(this.kysely, owner, chatId);
   }
 
-  async hasTerminalBinding(ownerInput: ChatOwner, chatId: string, sessionId: string): Promise<boolean> {
+  async getTerminalBinding(
+    ownerInput: ChatOwner,
+    chatId: string,
+    sessionId: string,
+  ): Promise<{ sessionCreatedAt: string | null } | null> {
     const owner = validateOwner(ownerInput);
     const parsedChatId = CanonicalChatIdSchema.parse(chatId);
     const parsedSessionId = TerminalSessionIdSchema.parse(sessionId);
     const durableMatch = await this.kysely.selectFrom("chat_terminal_bindings")
       .innerJoin("chats", "chats.id", "chat_terminal_bindings.chat_id")
-      .select("chat_terminal_bindings.session_id")
+      .select("chat_terminal_bindings.session_created_at")
       .where("chats.owner_type", "=", owner.type)
       .where("chats.owner_id", "=", owner.ownerId)
       .where("chat_terminal_bindings.chat_id", "=", parsedChatId)
       .where("chat_terminal_bindings.session_id", "=", parsedSessionId)
       .executeTakeFirst();
-    if (durableMatch) return true;
-    const legacyMatch = await this.kysely.selectFrom("chat_run_events")
-      .innerJoin("chats", "chats.id", "chat_run_events.chat_id")
-      .select("chat_run_events.id")
-      .where("chats.owner_type", "=", owner.type)
-      .where("chats.owner_id", "=", owner.ownerId)
-      .where("chat_run_events.chat_id", "=", parsedChatId)
-      .where(sql<boolean>`chat_run_events.event ->> 'type' = 'terminal.bound'`)
-      .where(sql<boolean>`chat_run_events.event ->> 'terminalSessionId' = ${parsedSessionId}`)
-      .executeTakeFirst();
-    return Boolean(legacyMatch);
+    return durableMatch
+      ? { sessionCreatedAt: durableMatch.session_created_at }
+      : null;
   }
 
   async getChatForTerminalBinding(
@@ -442,11 +438,13 @@ export class ChatRepository {
     chatId: string;
     runId?: string;
     sessionId: string;
+    sessionCreatedAt: string;
   }): Promise<boolean> {
     const owner = validateOwner(ownerInput);
     const chatId = CanonicalChatIdSchema.parse(input.chatId);
     const runId = input.runId === undefined ? undefined : requireSafeRef(input.runId);
     const sessionId = TerminalSessionIdSchema.parse(input.sessionId);
+    const sessionCreatedAt = z.iso.datetime().parse(input.sessionCreatedAt);
     return this.transact(async (trx) => {
       const chat = await selectOwnedChat(trx, owner, chatId, true);
       if (!chat) throw new ChatNotFoundError(chatId);
@@ -461,9 +459,14 @@ export class ChatRepository {
       const binding = await trx.insertInto("chat_terminal_bindings").values({
         chat_id: chatId,
         session_id: sessionId,
+        session_created_at: sessionCreatedAt,
         run_id: runId ?? null,
         bound_at: occurredAt,
-      }).onConflict((conflict) => conflict.columns(["chat_id", "session_id"]).doNothing())
+      }).onConflict((conflict) => conflict.columns(["chat_id", "session_id"]).doUpdateSet({
+        session_created_at: sessionCreatedAt,
+        run_id: runId ?? null,
+        bound_at: occurredAt,
+      }).where(sql<boolean>`chat_terminal_bindings.session_created_at IS DISTINCT FROM ${sessionCreatedAt}`))
         .returning("session_id")
         .executeTakeFirst();
       if (!binding) return false;

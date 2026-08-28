@@ -17,6 +17,7 @@ interface ChatTerminalRepository {
     chatId: string;
     runId?: string;
     sessionId: string;
+    sessionCreatedAt: string;
   }): Promise<boolean>;
 }
 
@@ -26,6 +27,7 @@ export interface ChatTerminalSessionService {
     chatId: string;
     runId?: string;
     sessionId: string;
+    sessionCreatedAt: string;
   }): Promise<void>;
 }
 

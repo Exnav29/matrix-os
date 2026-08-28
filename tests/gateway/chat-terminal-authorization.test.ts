@@ -5,17 +5,24 @@ const owner = { type: "personal" as const, ownerId: "user_a" };
 
 describe("Chat terminal attach authorization", () => {
   it("requires an exact persisted binding and a live attachable session", async () => {
-    const hasTerminalBinding = vi.fn(async () => true);
-    const get = vi.fn(async () => ({ name: "terminal_bound", status: "active", recoverable: false }));
+    const getTerminalBinding = vi.fn(async () => ({
+      sessionCreatedAt: "2026-08-28T10:00:00.000Z",
+    }));
+    const get = vi.fn(async () => ({
+      name: "terminal_bound",
+      status: "active",
+      recoverable: false,
+      createdAt: "2026-08-28T10:00:00.000Z",
+    }));
 
     await expect(authorizeChatTerminalAttach({
-      repository: { hasTerminalBinding },
+      repository: { getTerminalBinding },
       registry: { get },
       owner,
       chatId: "chat_selected",
       sessionId: "terminal_bound",
     })).resolves.toBe(true);
-    expect(hasTerminalBinding).toHaveBeenCalledWith(owner, "chat_selected", "terminal_bound");
+    expect(getTerminalBinding).toHaveBeenCalledWith(owner, "chat_selected", "terminal_bound");
     expect(get).toHaveBeenCalledWith("terminal_bound");
   });
 
@@ -23,7 +30,7 @@ describe("Chat terminal attach authorization", () => {
     const get = vi.fn();
 
     await expect(authorizeChatTerminalAttach({
-      repository: { hasTerminalBinding: vi.fn(async () => false) },
+      repository: { getTerminalBinding: vi.fn(async () => null) },
       registry: { get },
       owner,
       chatId: "chat_foreign",
@@ -38,8 +45,12 @@ describe("Chat terminal attach authorization", () => {
     { name: "terminal_renamed", status: "active", recoverable: false },
   ])("rejects unavailable live state %#", async (session) => {
     await expect(authorizeChatTerminalAttach({
-      repository: { hasTerminalBinding: vi.fn(async () => true) },
-      registry: { get: vi.fn(async () => session) },
+      repository: {
+        getTerminalBinding: vi.fn(async () => ({ sessionCreatedAt: "2026-08-28T10:00:00.000Z" })),
+      },
+      registry: {
+        get: vi.fn(async () => ({ ...session, createdAt: "2026-08-28T10:00:00.000Z" })),
+      },
       owner,
       chatId: "chat_selected",
       sessionId: "terminal_bound",
@@ -48,18 +59,51 @@ describe("Chat terminal attach authorization", () => {
 
   it("fails closed on invalid identifiers and dependency errors", async () => {
     await expect(authorizeChatTerminalAttach({
-      repository: { hasTerminalBinding: vi.fn(async () => { throw new Error("private database failure"); }) },
+      repository: { getTerminalBinding: vi.fn(async () => { throw new Error("private database failure"); }) },
       registry: { get: vi.fn() },
       owner,
       chatId: "chat_selected",
       sessionId: "terminal_bound",
     })).resolves.toBe(false);
     await expect(authorizeChatTerminalAttach({
-      repository: { hasTerminalBinding: vi.fn(async () => true) },
+      repository: {
+        getTerminalBinding: vi.fn(async () => ({ sessionCreatedAt: "2026-08-28T10:00:00.000Z" })),
+      },
       registry: { get: vi.fn() },
       owner,
       chatId: "not a chat id",
       sessionId: "terminal_bound",
     })).resolves.toBe(false);
+  });
+
+  it("rejects a replacement shell that reuses the bound session name", async () => {
+    await expect(authorizeChatTerminalAttach({
+      repository: {
+        getTerminalBinding: vi.fn(async () => ({ sessionCreatedAt: "2026-08-28T10:00:00.000Z" })),
+      },
+      registry: {
+        get: vi.fn(async () => ({
+          name: "terminal_bound",
+          status: "active",
+          recoverable: false,
+          createdAt: "2026-08-28T10:05:00.000Z",
+        })),
+      },
+      owner,
+      chatId: "chat_selected",
+      sessionId: "terminal_bound",
+    })).resolves.toBe(false);
+  });
+
+  it("fails closed for legacy bindings without a session incarnation", async () => {
+    const get = vi.fn();
+    await expect(authorizeChatTerminalAttach({
+      repository: { getTerminalBinding: vi.fn(async () => ({ sessionCreatedAt: null })) },
+      registry: { get },
+      owner,
+      chatId: "chat_selected",
+      sessionId: "terminal_bound",
+    })).resolves.toBe(false);
+    expect(get).not.toHaveBeenCalled();
   });
 });

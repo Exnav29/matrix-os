@@ -67,7 +67,9 @@ async function waitForCall(mock: ReturnType<typeof vi.fn>): Promise<void> {
 
 function repository(bound = true) {
   return {
-    hasTerminalBinding: vi.fn(async () => bound),
+    getTerminalBinding: vi.fn(async () => (
+      bound ? { sessionCreatedAt: "2026-08-28T10:00:00.000Z" } : null
+    )),
     listBoundTerminalSessionIds: vi.fn(async (_owner, ids: readonly string[]) => (
       ids.filter((id) => id === "terminal_bound")
     )),
@@ -82,7 +84,14 @@ function createWiring(input: {
   return createGatewayChatTerminalWiring({
     repository: input.repository,
     getPrincipal: (c) => requireRequestPrincipal(c),
-    registry: input.registry ?? { get: vi.fn(async (name: string) => ({ name, status: "active", recoverable: false })) },
+    registry: input.registry ?? {
+      get: vi.fn(async (name: string) => ({
+        name,
+        status: "active",
+        recoverable: false,
+        createdAt: "2026-08-28T10:00:00.000Z",
+      })),
+    },
     shellWs: { open: input.open ?? vi.fn(async () => ({ onMessage: vi.fn(), onClose: vi.fn() })) },
     onUnexpectedSendFailure: vi.fn(),
   });
@@ -127,13 +136,84 @@ describe("createGateway Chat terminal production wiring", () => {
     captured.events?.onOpen?.(new Event("open"), socket.context);
     await waitForCall(open);
 
-    expect(repo.hasTerminalBinding).toHaveBeenCalledWith(
+    expect(repo.getTerminalBinding).toHaveBeenCalledWith(
       { type: "personal", ownerId: "user_route_owner" },
       "chat_selected",
       "terminal_bound",
     );
     expect(open).toHaveBeenCalledOnce();
     expect(socket.sent).toEqual([]);
+  });
+
+  it("parses the terminal WebSocket query through one bounded contract", async () => {
+    const repo = repository(true);
+    const open = vi.fn(async () => ({ onMessage: vi.fn(), onClose: vi.fn() }));
+    const wiring = createWiring({ repository: repo, open });
+    const app = new Hono();
+    installPrincipal(app);
+    const captured: { events?: WSEvents } = {};
+    wiring.registerSessionRoute(app, fakeUpgrade(captured));
+
+    await app.request(
+      "/ws/terminal/session?session=terminal_bound&chat=chat_selected&fromSeq=42&client=soft&cols=120&rows=40&lease=exclusive",
+    );
+    const socket = fakeSocket();
+    captured.events?.onOpen?.(new Event("open"), socket.context);
+    await waitForCall(open);
+
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({
+      session: "terminal_bound",
+      fromSeq: 42,
+      clientClass: "soft",
+      declaredSize: { cols: 120, rows: 40 },
+      exclusiveLease: true,
+    }));
+  });
+
+  it.each([
+    "session=terminal_bound&fromSeq=-1",
+    "session=terminal_bound&fromSeq=9007199254740992",
+    "session=terminal_bound&client=unknown",
+    "session=terminal_bound&cols=501&rows=40",
+    "session=terminal_bound&cols=120",
+    "session=terminal_bound&lease=shared",
+    "session=not%20valid",
+    "session=terminal_bound&chat=not%20valid",
+    "session=terminal_bound&unknown=value",
+  ])("rejects an invalid terminal WebSocket query before dependency access: %s", async (query) => {
+    const repo = repository(true);
+    const open = vi.fn(async () => ({ onMessage: vi.fn(), onClose: vi.fn() }));
+    const getPrincipal = vi.fn(() => ({ userId: "user_route_owner", source: "jwt" as const }));
+    const wiring = createGatewayChatTerminalWiring({
+      repository: repo,
+      getPrincipal,
+      registry: {
+        get: vi.fn(async (name: string) => ({
+          name,
+          status: "active",
+          recoverable: false,
+          createdAt: "2026-08-28T10:00:00.000Z",
+        })),
+      },
+      shellWs: { open },
+      onUnexpectedSendFailure: vi.fn(),
+    });
+    const app = new Hono();
+    const captured: { events?: WSEvents } = {};
+    wiring.registerSessionRoute(app, fakeUpgrade(captured));
+
+    await app.request(`/ws/terminal/session?${query}`);
+    const socket = fakeSocket();
+    captured.events?.onOpen?.(new Event("open"), socket.context);
+
+    expect(socket.sent).toEqual([JSON.stringify({
+      type: "error",
+      code: "invalid_request",
+      message: "Invalid request",
+    })]);
+    expect(socket.close).toHaveBeenCalledOnce();
+    expect(getPrincipal).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -191,7 +271,14 @@ describe("createGateway Chat terminal production wiring", () => {
     const wiring = createGatewayChatTerminalWiring({
       repository: repo,
       getPrincipal,
-      registry: { get: vi.fn(async (name: string) => ({ name, status: "active", recoverable: false })) },
+      registry: {
+        get: vi.fn(async (name: string) => ({
+          name,
+          status: "active",
+          recoverable: false,
+          createdAt: "2026-08-28T10:00:00.000Z",
+        })),
+      },
       shellWs: { open },
       onUnexpectedSendFailure: vi.fn(),
     });
@@ -225,7 +312,14 @@ describe("createGateway Chat terminal production wiring", () => {
     };
     const wiring = createWiring({
       repository: repo,
-      registry: { get: vi.fn(async (name: string) => ({ name, status: "active", recoverable: false })) },
+      registry: {
+        get: vi.fn(async (name: string) => ({
+          name,
+          status: "active",
+          recoverable: false,
+          createdAt: "2026-08-28T10:00:00.000Z",
+        })),
+      },
     });
     const app = new Hono();
     installPrincipal(app, "user_mount_owner");

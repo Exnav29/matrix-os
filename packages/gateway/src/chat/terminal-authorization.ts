@@ -4,7 +4,11 @@ import type { ChatOwner } from "./records.js";
 
 export async function authorizeChatTerminalAttach(input: {
   repository: {
-    hasTerminalBinding(owner: ChatOwner, chatId: string, sessionId: string): Promise<boolean>;
+    getTerminalBinding(
+      owner: ChatOwner,
+      chatId: string,
+      sessionId: string,
+    ): Promise<{ sessionCreatedAt: string | null } | null>;
   };
   registry: { get(name: string): Promise<unknown> };
   owner: ChatOwner;
@@ -14,13 +18,20 @@ export async function authorizeChatTerminalAttach(input: {
   try {
     const chatId = CanonicalChatIdSchema.parse(input.chatId);
     const sessionId = validateSessionName(input.sessionId);
-    if (!await input.repository.hasTerminalBinding(input.owner, chatId, sessionId)) return false;
+    const binding = await input.repository.getTerminalBinding(input.owner, chatId, sessionId);
+    if (!binding?.sessionCreatedAt) return false;
     const session = await input.registry.get(sessionId);
     if (!session || typeof session !== "object") return false;
-    const candidate = session as { name?: unknown; status?: unknown; recoverable?: unknown };
+    const candidate = session as {
+      name?: unknown;
+      status?: unknown;
+      recoverable?: unknown;
+      createdAt?: unknown;
+    };
     return candidate.name === sessionId
       && candidate.status === "active"
-      && candidate.recoverable !== true;
+      && candidate.recoverable !== true
+      && candidate.createdAt === binding.sessionCreatedAt;
   } catch (err: unknown) {
     console.warn(
       "[chat] terminal attach authorization failed:",
