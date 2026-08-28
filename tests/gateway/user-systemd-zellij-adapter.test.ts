@@ -140,6 +140,35 @@ describe("user-systemd zellij adapter", () => {
     expect(pinned.attachSession).toHaveBeenCalledWith(live.sessionName, {});
   });
 
+  it("exposes workspace runtimes to Chat terminal authorization and attach only when enabled", async () => {
+    const workspace = descriptor({
+      scope: "workspace",
+      kind: "agent",
+      displayName: "sess_chat_agent",
+      cwd: homePath,
+    });
+    controller.list.mockResolvedValue([workspace]);
+    controller.findByDisplayName.mockImplementation(async (scope, name) => (
+      scope === "workspace" && name === workspace.displayName ? workspace : null
+    ));
+    const adapter = createUserSystemdZellijAdapter({
+      homePath,
+      generation: GENERATION,
+      controller,
+      baseAdapter: base,
+      adapterFactory: vi.fn(() => pinned),
+      includeWorkspaceSessions: true,
+    });
+
+    await expect(adapter.getSessionCreatedAt?.("sess_chat_agent")).resolves.toBe(workspace.createdAt);
+    await expect(adapter.listSessions()).resolves.toEqual(["sess_chat_agent"]);
+    adapter.attachSession("sess_chat_agent");
+
+    expect(controller.list).toHaveBeenCalledWith({ runningOnly: true });
+    expect(controller.findByDisplayName).toHaveBeenCalledWith("workspace", "sess_chat_agent");
+    expect(pinned.attachSession).toHaveBeenCalledWith(workspace.sessionName, {});
+  });
+
   it("renames metadata only and deletes the immutable unit through the controller", async () => {
     const live = descriptor({ cwd: homePath });
     controller.findByDisplayName.mockResolvedValue(live);

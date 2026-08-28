@@ -48,6 +48,7 @@ export interface ZellijLayoutResult {
 export interface ZellijStartResult extends ZellijLayoutResult {
   ok: true;
   status: "running";
+  publicSessionName?: string;
   createdAt?: string;
 }
 

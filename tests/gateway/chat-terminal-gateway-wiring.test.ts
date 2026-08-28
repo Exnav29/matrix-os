@@ -101,6 +101,8 @@ function createWiring(input: {
 describe("createGateway Chat terminal production wiring", () => {
   it("keeps createGateway connected to all three tested production seams", () => {
     const source = readFileSync(join(process.cwd(), "packages/gateway/src/server.ts"), "utf8");
+    const adapter = source.indexOf("createUserSystemdZellijAdapter({");
+    const workspaceSessions = source.indexOf("includeWorkspaceSessions: true", adapter);
     const construct = source.indexOf("createGatewayChatTerminalWiring({");
     const shellDeps = source.indexOf("...chatTerminalWiring.shellRouteDeps", construct);
     const canonicalMount = source.indexOf(
@@ -114,6 +116,9 @@ describe("createGateway Chat terminal production wiring", () => {
       workspaceMount,
     );
 
+    expect(adapter).toBeGreaterThan(-1);
+    expect(workspaceSessions).toBeGreaterThan(adapter);
+    expect(workspaceSessions).toBeLessThan(construct);
     expect(construct).toBeGreaterThan(-1);
     expect(shellDeps).toBeGreaterThan(construct);
     expect(canonicalMount).toBeGreaterThan(shellDeps);

@@ -441,6 +441,7 @@ export async function createGateway(config: GatewayConfig) {
         homePath,
         generation: terminalRuntimeGeneration,
         controller: userSystemdTerminalController,
+        includeWorkspaceSessions: true,
       })
     : createZellijAdapter({ homePath });
   const shellLayoutStore = new LayoutStore({ homePath, adapter: zellijAdapter });

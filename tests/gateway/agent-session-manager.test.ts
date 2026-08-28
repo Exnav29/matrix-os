@@ -85,6 +85,7 @@ describe("agent-session-manager", () => {
         ok: true as const,
         status: "running" as const,
         sessionName: `matrix-${sessionId}`,
+        publicSessionName: sessionId,
         layoutPath: join(homePath, "system", "zellij", "layouts", `${sessionId}.kdl`),
         createdAt: "2026-04-26T00:00:00.500Z",
       })),
@@ -176,7 +177,7 @@ describe("agent-session-manager", () => {
         runtime: {
           type: "zellij",
           status: "running",
-          zellijSession: "matrix-sess_abc123",
+          zellijSession: "sess_abc123",
           createdAt: "2026-04-26T00:00:00.500Z",
         },
         nativeAttachCommand: ["zellij", "attach", "matrix-sess_abc123"],

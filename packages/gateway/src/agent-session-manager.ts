@@ -410,7 +410,7 @@ export function createAgentSessionManager(options: {
         runtime: {
           type: "zellij",
           status: runtimeStart.status,
-          zellijSession: runtimeStart.sessionName,
+          zellijSession: runtimeStart.publicSessionName ?? runtimeStart.sessionName,
           zellijLayoutPath: runtimeStart.layoutPath,
           ...(runtimeStart.createdAt ? { createdAt: runtimeStart.createdAt } : {}),
         },
