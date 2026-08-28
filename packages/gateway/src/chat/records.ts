@@ -13,6 +13,7 @@ import {
   type CanonicalChatRunActivity,
   type CanonicalChatSummary,
   type CanonicalChatTurn,
+  type CanonicalChatUserState,
   type CanonicalOwnerScope,
 } from "@matrix-os/contracts";
 import { sql, type RawBuilder, type Selectable } from "kysely";
@@ -39,8 +40,10 @@ export interface ChatRecord {
 export type ChatOutboxEventType =
   | "chat.created"
   | "chat.updated"
+  | "chat.user_state_updated"
   | "turn.accepted"
   | "run.activity"
+  | "chat.terminal_bound"
   | "run.completed"
   | "run.failed"
   | "run.aborted"
@@ -121,6 +124,7 @@ export function messageSearchText(message: CanonicalChatMessage): string {
 export function toChatRecord(
   row: Selectable<ChatsTable>,
   activeRun?: Selectable<ChatRunsTable>,
+  userState?: CanonicalChatUserState,
 ): ChatRecord {
   const chat = CanonicalChatSchema.parse({
     id: row.id,
@@ -131,7 +135,10 @@ export function toChatRecord(
     revision: Number(row.revision),
     messageCount: Number(row.message_count),
     ...(row.collaboration === null ? {} : { collaboration: parseJson(row.collaboration) }),
-    ...(row.user_state === null ? {} : { userState: parseJson(row.user_state) }),
+    userState: userState
+      ?? (row.user_state === null
+        ? { readThroughSeq: 0, pinned: false, muted: false }
+        : parseJson(row.user_state)),
     ...(row.shell_state === null ? {} : { shellState: parseJson(row.shell_state) }),
     ...(row.fork_provenance === null ? {} : { forkProvenance: parseJson(row.fork_provenance) }),
     ...(row.last_message_preview === null ? {} : { lastMessagePreview: row.last_message_preview }),

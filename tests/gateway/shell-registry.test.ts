@@ -1452,6 +1452,22 @@ describe("shell registry", () => {
     expect(adapter.createSession).not.toHaveBeenCalled();
   });
 
+  it("refuses to adopt an existing live session when exclusive creation is requested", async () => {
+    const root = await tempRoot();
+    const adapter = {
+      listSessions: vi.fn(async () => ["chat-existing"]),
+      createSession: vi.fn(async () => undefined),
+      deleteSession: vi.fn(async () => undefined),
+    };
+    const registry = new ShellRegistry({ homePath: root, adapter });
+
+    await expect(registry.create({ name: "chat-existing", exclusive: true })).rejects.toMatchObject({
+      code: "session_exists",
+      status: 409,
+    });
+    expect(adapter.createSession).not.toHaveBeenCalled();
+  });
+
   it("keeps a live background session attached across reopen and reconnect reads without creating or deleting it", async () => {
     const root = await tempRoot();
     const persistPath = join(root, "system", "shell-sessions.json");

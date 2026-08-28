@@ -214,6 +214,7 @@ export class ShellRegistry {
     layout?: string;
     cmd?: string;
     agent?: AgentKind;
+    exclusive?: boolean;
   }): Promise<ShellSession> {
     return this.withMutationLock(async () => {
       const name = validateSessionName(input.name);
@@ -226,6 +227,9 @@ export class ShellRegistry {
       let changed = await this.markMissingMetadataExited(file, live);
 
       if (live.has(name)) {
+        if (input.exclusive) {
+          throw shellError("session_exists", "Session already exists", 409);
+        }
         const now = new Date().toISOString();
         const session: PersistedShellSession = {
           ...(file.sessions[name] ?? this.adoptSession(name, now)),
