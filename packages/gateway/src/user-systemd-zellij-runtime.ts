@@ -175,6 +175,7 @@ export function createUserSystemdZellijRuntime(options: {
         status: "running",
         sessionName: descriptor.sessionName,
         layoutPath: descriptor.layoutPath,
+        createdAt: descriptor.createdAt,
       };
     },
 

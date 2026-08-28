@@ -39,6 +39,7 @@ export interface WorkspaceSession {
     status: RuntimeStatus;
     zellijSession?: string;
     zellijLayoutPath?: string;
+    createdAt?: string;
     tmuxSession?: string;
     fallbackReason?: string;
   };
@@ -411,6 +412,7 @@ export function createAgentSessionManager(options: {
           status: runtimeStart.status,
           zellijSession: runtimeStart.sessionName,
           zellijLayoutPath: runtimeStart.layoutPath,
+          ...(runtimeStart.createdAt ? { createdAt: runtimeStart.createdAt } : {}),
         },
         terminalSessionId: `term_${sessionId}`,
         transcriptPath: join(homePath, "system", "session-output", `${sessionId}.jsonl`),
