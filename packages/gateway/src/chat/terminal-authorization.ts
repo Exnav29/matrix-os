@@ -2,6 +2,32 @@ import { CanonicalChatIdSchema } from "@matrix-os/contracts";
 import { validateSessionName } from "../shell/names.js";
 import type { ChatOwner } from "./records.js";
 
+export async function authorizeStandaloneTerminalAttach(input: {
+  repository: {
+    listBoundTerminalSessionIds(
+      owner: ChatOwner,
+      sessionIds: readonly string[],
+    ): Promise<readonly string[]>;
+  };
+  owner: ChatOwner;
+  sessionId: string;
+}): Promise<boolean> {
+  try {
+    const sessionId = validateSessionName(input.sessionId);
+    const boundSessionIds = await input.repository.listBoundTerminalSessionIds(
+      input.owner,
+      [sessionId],
+    );
+    return !boundSessionIds.includes(sessionId);
+  } catch (err: unknown) {
+    console.warn(
+      "[chat] standalone terminal attach authorization failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return false;
+  }
+}
+
 export async function authorizeChatTerminalAttach(input: {
   repository: {
     getTerminalBinding(

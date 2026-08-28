@@ -1,9 +1,47 @@
 import { describe, expect, it, vi } from "vitest";
-import { authorizeChatTerminalAttach } from "../../packages/gateway/src/chat/terminal-authorization.js";
+import {
+  authorizeChatTerminalAttach,
+  authorizeStandaloneTerminalAttach,
+} from "../../packages/gateway/src/chat/terminal-authorization.js";
 
 const owner = { type: "personal" as const, ownerId: "user_a" };
 
 describe("Chat terminal attach authorization", () => {
+  it("allows standalone attachment only when the owner has no Chat binding", async () => {
+    const listBoundTerminalSessionIds = vi.fn(async (_owner, sessionIds: readonly string[]) => (
+      sessionIds.filter((sessionId) => sessionId === "terminal_bound")
+    ));
+
+    await expect(authorizeStandaloneTerminalAttach({
+      repository: { listBoundTerminalSessionIds },
+      owner,
+      sessionId: "terminal_manual",
+    })).resolves.toBe(true);
+    await expect(authorizeStandaloneTerminalAttach({
+      repository: { listBoundTerminalSessionIds },
+      owner,
+      sessionId: "terminal_bound",
+    })).resolves.toBe(false);
+
+    expect(listBoundTerminalSessionIds).toHaveBeenNthCalledWith(1, owner, ["terminal_manual"]);
+    expect(listBoundTerminalSessionIds).toHaveBeenNthCalledWith(2, owner, ["terminal_bound"]);
+  });
+
+  it("fails standalone attachment closed on invalid identifiers and dependency errors", async () => {
+    await expect(authorizeStandaloneTerminalAttach({
+      repository: {
+        listBoundTerminalSessionIds: vi.fn(async () => { throw new Error("private database failure"); }),
+      },
+      owner,
+      sessionId: "terminal_manual",
+    })).resolves.toBe(false);
+    await expect(authorizeStandaloneTerminalAttach({
+      repository: { listBoundTerminalSessionIds: vi.fn(async () => []) },
+      owner,
+      sessionId: "not a valid session",
+    })).resolves.toBe(false);
+  });
+
   it("requires an exact persisted binding and a live attachable session", async () => {
     const getTerminalBinding = vi.fn(async () => ({
       sessionCreatedAt: "2026-08-28T10:00:00.000Z",

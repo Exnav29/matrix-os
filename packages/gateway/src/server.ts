@@ -261,6 +261,7 @@ import {
   createGatewayChatTerminalWiring,
   parseTerminalSizingParams,
 } from "./chat/terminal-wiring.js";
+import { authorizeStandaloneTerminalAttach } from "./chat/terminal-authorization.js";
 import { MessagingKyselyRepository } from "./messages/repository.js";
 import { createMessagingRoutes } from "./messages/routes.js";
 import type { WSContext } from "hono/ws";
@@ -2615,14 +2616,27 @@ export async function createGateway(config: GatewayConfig) {
               typeof fromSeqParam === "string" && /^\d+$/.test(fromSeqParam)
                 ? Number(fromSeqParam)
                 : 0;
-            void zellijShellWs.open({
-              ws,
-              session: namedSession,
-              fromSeq,
-              clientClass: sizingParams.clientClass,
-              declaredSize: sizingParams.declaredSize,
-              exclusiveLease,
-            }).then((session) => {
+            void (async () => {
+              if (!chatRepository) {
+                throw new Error("Chat terminal repository unavailable");
+              }
+              const principal = requireRequestPrincipal(c);
+              if (!await authorizeStandaloneTerminalAttach({
+                repository: chatRepository,
+                owner: { type: "personal", ownerId: principal.userId },
+                sessionId: namedSession,
+              })) {
+                throw new Error("Standalone terminal attachment denied");
+              }
+              return zellijShellWs.open({
+                ws,
+                session: namedSession,
+                fromSeq,
+                clientClass: sizingParams.clientClass,
+                declaredSize: sizingParams.declaredSize,
+                exclusiveLease,
+              });
+            })().then((session) => {
               if (namedSocketClosed) {
                 session.onClose();
                 return;

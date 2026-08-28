@@ -107,6 +107,8 @@ describe("createGateway Chat terminal production wiring", () => {
     const chatRegistry = source.indexOf("const chatZellijShellRegistry =", workspaceSessions);
     const chatSocket = source.indexOf("const chatZellijShellWs =", chatRegistry);
     const construct = source.indexOf("createGatewayChatTerminalWiring({");
+    const standaloneSocket = source.indexOf('"/ws/terminal",', construct);
+    const standaloneGuard = source.indexOf("authorizeStandaloneTerminalAttach({", standaloneSocket);
     const shellDeps = source.indexOf("...chatTerminalWiring.shellRouteDeps", construct);
     const canonicalMount = source.indexOf(
       'app.route("/api/terminal", createShellRoutes(shellRouteDeps))',
@@ -128,6 +130,8 @@ describe("createGateway Chat terminal production wiring", () => {
     expect(construct).toBeGreaterThan(-1);
     expect(source.slice(construct, construct + 500)).toContain("registry: chatZellijShellRegistry");
     expect(source.slice(construct, construct + 500)).toContain("shellWs: chatZellijShellWs");
+    expect(standaloneSocket).toBeGreaterThan(construct);
+    expect(standaloneGuard).toBeGreaterThan(standaloneSocket);
     expect(shellDeps).toBeGreaterThan(construct);
     expect(canonicalMount).toBeGreaterThan(shellDeps);
     expect(socketMount).toBeGreaterThan(canonicalMount);
