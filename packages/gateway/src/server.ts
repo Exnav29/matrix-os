@@ -441,9 +441,16 @@ export async function createGateway(config: GatewayConfig) {
         homePath,
         generation: terminalRuntimeGeneration,
         controller: userSystemdTerminalController,
-        includeWorkspaceSessions: true,
       })
     : createZellijAdapter({ homePath });
+  const chatZellijAdapter = userSystemdTerminalController && terminalRuntimeGeneration
+    ? createUserSystemdZellijAdapter({
+        homePath,
+        generation: terminalRuntimeGeneration,
+        controller: userSystemdTerminalController,
+        includeWorkspaceSessions: true,
+      })
+    : zellijAdapter;
   const shellLayoutStore = new LayoutStore({ homePath, adapter: zellijAdapter });
   const zellijShellRegistry = new ZellijShellRegistry({
     homePath,
@@ -451,6 +458,14 @@ export async function createGateway(config: GatewayConfig) {
     scrollbackStore: shellScrollbackStore,
     preferencesStore: shellPreferencesStore,
   });
+  const chatZellijShellRegistry = chatZellijAdapter === zellijAdapter
+    ? zellijShellRegistry
+    : new ZellijShellRegistry({
+        homePath,
+        adapter: chatZellijAdapter,
+        persistPath: join(homePath, "system", "chat-shell-sessions.json"),
+        scrollbackStore: shellScrollbackStore,
+      });
   const symphonyRunner = createSymphonyRunner({ homePath });
   const initialSymphonyPort = await resolveInitialSymphonyPort(symphonyRunner);
   if (initialSymphonyPort) {
@@ -466,6 +481,18 @@ export async function createGateway(config: GatewayConfig) {
       });
     },
   });
+  const chatZellijShellWs = chatZellijShellRegistry === zellijShellRegistry
+    ? zellijShellWs
+    : createShellWsHandler({
+        registry: chatZellijShellRegistry,
+        adapter: chatZellijAdapter,
+        scrollbackStore: shellScrollbackStore,
+        persistCanonicalSize: (name, size) => {
+          void chatZellijShellRegistry.updateCanonicalSize(name, size).catch((err: unknown) => {
+            console.warn("[shell] Chat canonical size persist failed:", err instanceof Error ? err.message : String(err));
+          });
+        },
+      });
   const shellSessionReaper = createShellSessionReaper({ registry: zellijShellRegistry });
   shellSessionReaper.start();
   const forwardTunnelHub = createForwardTunnelHub();
@@ -1802,8 +1829,8 @@ export async function createGateway(config: GatewayConfig) {
   const chatTerminalWiring = createGatewayChatTerminalWiring({
     repository: chatRepository,
     getPrincipal: (c) => requireRequestPrincipal(c),
-    registry: zellijShellRegistry,
-    shellWs: zellijShellWs,
+    registry: chatZellijShellRegistry,
+    shellWs: chatZellijShellWs,
     onUnexpectedSendFailure: logUnexpectedWsSendFailure,
   });
   const shellRouteDeps = {
@@ -4452,6 +4479,7 @@ export async function createGateway(config: GatewayConfig) {
       await processManager.shutdownAll();
       await forwardTunnelHub.close();
       shellSessionReaper.stop();
+      if (chatZellijShellWs !== zellijShellWs) await chatZellijShellWs.dispose();
       await zellijShellWs.dispose();
       await sessionRegistry.shutdown();
       await watcher.close();

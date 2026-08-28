@@ -102,7 +102,10 @@ describe("createGateway Chat terminal production wiring", () => {
   it("keeps createGateway connected to all three tested production seams", () => {
     const source = readFileSync(join(process.cwd(), "packages/gateway/src/server.ts"), "utf8");
     const adapter = source.indexOf("createUserSystemdZellijAdapter({");
-    const workspaceSessions = source.indexOf("includeWorkspaceSessions: true", adapter);
+    const chatAdapter = source.indexOf("const chatZellijAdapter =", adapter);
+    const workspaceSessions = source.indexOf("includeWorkspaceSessions: true", chatAdapter);
+    const chatRegistry = source.indexOf("const chatZellijShellRegistry =", workspaceSessions);
+    const chatSocket = source.indexOf("const chatZellijShellWs =", chatRegistry);
     const construct = source.indexOf("createGatewayChatTerminalWiring({");
     const shellDeps = source.indexOf("...chatTerminalWiring.shellRouteDeps", construct);
     const canonicalMount = source.indexOf(
@@ -117,9 +120,14 @@ describe("createGateway Chat terminal production wiring", () => {
     );
 
     expect(adapter).toBeGreaterThan(-1);
-    expect(workspaceSessions).toBeGreaterThan(adapter);
+    expect(chatAdapter).toBeGreaterThan(adapter);
+    expect(workspaceSessions).toBeGreaterThan(chatAdapter);
+    expect(chatRegistry).toBeGreaterThan(workspaceSessions);
+    expect(chatSocket).toBeGreaterThan(chatRegistry);
     expect(workspaceSessions).toBeLessThan(construct);
     expect(construct).toBeGreaterThan(-1);
+    expect(source.slice(construct, construct + 500)).toContain("registry: chatZellijShellRegistry");
+    expect(source.slice(construct, construct + 500)).toContain("shellWs: chatZellijShellWs");
     expect(shellDeps).toBeGreaterThan(construct);
     expect(canonicalMount).toBeGreaterThan(shellDeps);
     expect(socketMount).toBeGreaterThan(canonicalMount);
