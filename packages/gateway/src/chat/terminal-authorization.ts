@@ -27,10 +27,12 @@ export async function authorizeChatTerminalAttach(input: {
       status?: unknown;
       recoverable?: unknown;
       createdAt?: unknown;
+      incarnationVerified?: unknown;
     };
     return candidate.name === sessionId
       && candidate.status === "active"
       && candidate.recoverable !== true
+      && candidate.incarnationVerified === true
       && candidate.createdAt === binding.sessionCreatedAt;
   } catch (err: unknown) {
     console.warn(

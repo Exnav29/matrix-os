@@ -483,6 +483,7 @@ export class ChatRepository {
           occurredAt,
           type: "terminal.bound",
           terminalSessionId: sessionId,
+          terminalSessionCreatedAt: sessionCreatedAt,
         });
         await trx.insertInto("chat_run_events").values({
           id: activity.id,

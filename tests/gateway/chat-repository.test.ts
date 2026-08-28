@@ -99,7 +99,15 @@ function terminalBinding(
   id: string,
   terminalSessionId: string,
 ): CanonicalChatRunActivity {
-  return { id, chatId, runId, occurredAt: now, type: "terminal.bound", terminalSessionId };
+  return {
+    id,
+    chatId,
+    runId,
+    occurredAt: now,
+    type: "terminal.bound",
+    terminalSessionId,
+    terminalSessionCreatedAt: now,
+  };
 }
 
 describe("ChatRepository", () => {

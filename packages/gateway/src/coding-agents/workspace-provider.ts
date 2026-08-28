@@ -293,6 +293,7 @@ export function createWorkspaceCodingAgentProvider(
           threadId: thread.id,
           occurredAt: now().toISOString(),
           terminalSessionId,
+          terminalSessionCreatedAt: result.session.startedAt,
         })],
         resumeState: { conversationId: sessionId },
       };

@@ -66,6 +66,7 @@ const TerminalSessionQuerySchema = z.object({
   cols: z.string().regex(/^[1-9]\d{0,2}$/).transform(Number).pipe(z.number().int().min(1).max(500)).optional(),
   rows: z.string().regex(/^[1-9]\d{0,2}$/).transform(Number).pipe(z.number().int().min(1).max(200)).optional(),
   lease: z.literal("exclusive").optional(),
+  token: z.string().min(1).max(8_192).optional(),
 }).strict().superRefine((query, ctx) => {
   if ((query.cols === undefined) !== (query.rows === undefined)) {
     ctx.addIssue({ code: "custom", message: "Terminal dimensions must be paired" });

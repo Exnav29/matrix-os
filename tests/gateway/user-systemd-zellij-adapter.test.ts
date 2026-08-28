@@ -128,6 +128,7 @@ describe("user-systemd zellij adapter", () => {
     });
 
     await expect(adapter.listSessions()).resolves.toEqual(["Main"]);
+    await expect(adapter.getSessionCreatedAt?.("Main")).resolves.toBe(live.createdAt);
     await adapter.sendInput("Main", "echo safe");
     adapter.attachSession("Main");
 

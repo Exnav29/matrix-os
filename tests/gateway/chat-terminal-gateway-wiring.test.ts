@@ -90,6 +90,7 @@ function createWiring(input: {
         status: "active",
         recoverable: false,
         createdAt: "2026-08-28T10:00:00.000Z",
+        incarnationVerified: true,
       })),
     },
     shellWs: { open: input.open ?? vi.fn(async () => ({ onMessage: vi.fn(), onClose: vi.fn() })) },
@@ -170,6 +171,26 @@ describe("createGateway Chat terminal production wiring", () => {
     }));
   });
 
+  it("accepts the bounded query token already consumed by WebSocket authentication", async () => {
+    const repo = repository(true);
+    const open = vi.fn(async () => ({ onMessage: vi.fn(), onClose: vi.fn() }));
+    const wiring = createWiring({ repository: repo, open });
+    const app = new Hono();
+    installPrincipal(app);
+    const captured: { events?: WSEvents } = {};
+    wiring.registerSessionRoute(app, fakeUpgrade(captured));
+
+    await app.request(
+      "/ws/terminal/session?session=terminal_bound&chat=chat_selected&token=signed-query-token",
+    );
+    const socket = fakeSocket();
+    captured.events?.onOpen?.(new Event("open"), socket.context);
+    await waitForCall(open);
+
+    expect(open).toHaveBeenCalledOnce();
+    expect(socket.sent).toEqual([]);
+  });
+
   it.each([
     "session=terminal_bound&fromSeq=-1",
     "session=terminal_bound&fromSeq=9007199254740992",
@@ -193,6 +214,7 @@ describe("createGateway Chat terminal production wiring", () => {
           status: "active",
           recoverable: false,
           createdAt: "2026-08-28T10:00:00.000Z",
+          incarnationVerified: true,
         })),
       },
       shellWs: { open },
@@ -277,6 +299,7 @@ describe("createGateway Chat terminal production wiring", () => {
           status: "active",
           recoverable: false,
           createdAt: "2026-08-28T10:00:00.000Z",
+          incarnationVerified: true,
         })),
       },
       shellWs: { open },

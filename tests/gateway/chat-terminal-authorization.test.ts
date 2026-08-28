@@ -13,6 +13,7 @@ describe("Chat terminal attach authorization", () => {
       status: "active",
       recoverable: false,
       createdAt: "2026-08-28T10:00:00.000Z",
+      incarnationVerified: true,
     }));
 
     await expect(authorizeChatTerminalAttach({
@@ -49,7 +50,7 @@ describe("Chat terminal attach authorization", () => {
         getTerminalBinding: vi.fn(async () => ({ sessionCreatedAt: "2026-08-28T10:00:00.000Z" })),
       },
       registry: {
-        get: vi.fn(async () => ({ ...session, createdAt: "2026-08-28T10:00:00.000Z" })),
+        get: vi.fn(async () => ({ ...session, createdAt: "2026-08-28T10:00:00.000Z", incarnationVerified: true })),
       },
       owner,
       chatId: "chat_selected",
@@ -87,6 +88,27 @@ describe("Chat terminal attach authorization", () => {
           status: "active",
           recoverable: false,
           createdAt: "2026-08-28T10:05:00.000Z",
+          incarnationVerified: true,
+        })),
+      },
+      owner,
+      chatId: "chat_selected",
+      sessionId: "terminal_bound",
+    })).resolves.toBe(false);
+  });
+
+  it("rejects a matching timestamp unless the live runtime verified the incarnation", async () => {
+    await expect(authorizeChatTerminalAttach({
+      repository: {
+        getTerminalBinding: vi.fn(async () => ({ sessionCreatedAt: "2026-08-28T10:00:00.000Z" })),
+      },
+      registry: {
+        get: vi.fn(async () => ({
+          name: "terminal_bound",
+          status: "active",
+          recoverable: false,
+          createdAt: "2026-08-28T10:00:00.000Z",
+          incarnationVerified: false,
         })),
       },
       owner,

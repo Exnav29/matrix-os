@@ -52,6 +52,12 @@ function workspaceSession(overrides: Record<string, unknown> = {}) {
       zellijSession: "matrix-agent-workspace-1",
     },
     terminalSessionId: "term_sess_workspace_1",
+    startedAt: baseNow.toISOString(),
+    lastActivityAt: baseNow.toISOString(),
+    transcriptPath: "/home/matrix/home/system/sessions/sess_workspace_1.jsonl",
+    attachedClients: 0,
+    writeMode: "owner",
+    ownerId: ownerPrincipal.userId,
     ...overrides,
   };
 }
@@ -296,7 +302,10 @@ exec /bin/sh "$@"
     const startedEvents = Array.isArray(started) ? started : started.events;
     expect(startedEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "thread.status", status: "running" }),
-      expect.objectContaining({ type: "terminal.bound" }),
+      expect.objectContaining({
+        type: "terminal.bound",
+        terminalSessionCreatedAt: workspaceSession().startedAt,
+      }),
     ]));
     expect(runtime.startSession).toHaveBeenCalledWith(expect.objectContaining({
       request: expect.objectContaining({ agent: "claude" }),
@@ -384,6 +393,9 @@ exec /bin/sh "$@"
       "thread.status",
       "terminal.bound",
     ]);
+    expect(snapshot.events.items.at(-1)).toMatchObject({
+      terminalSessionCreatedAt: workspaceSession().startedAt,
+    });
   });
 
   it("forwards structured review references to the workspace runtime session", async () => {
