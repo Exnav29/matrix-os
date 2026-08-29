@@ -151,6 +151,7 @@ export class CanonicalChatOrchestrator {
       | "admitTurn"
       | "markRunRunning"
       | "appendRunActivities"
+      | "appendAssistantDelta"
       | "updateAdapterState"
       | "finishRun"
       | "getAdapterState"
@@ -608,6 +609,9 @@ export class CanonicalChatOrchestrator {
         ? adapter.resume({ ...input, resumeState })
         : adapter.start(input);
       for await (const rawEvent of events) {
+        if (controller.signal.aborted) {
+          throw new Error("Provider emitted an event after cancellation");
+        }
         const event = CanonicalProviderRunEventSchema.parse(rawEvent);
         if (terminal) throw new Error("Provider emitted an event after completion");
         if (event.type === "state.updated") {
@@ -625,11 +629,14 @@ export class CanonicalChatOrchestrator {
             throw new Error("Provider assistant output exceeded the canonical limit");
           }
           text += event.delta;
-          await this.persistActivities(owner, run, [{
-            type: "assistant.delta",
+          await this.options.repository.appendAssistantDelta(owner, {
+            chatId: run.chatId,
+            runId: run.id,
             messageId: `msg_${run.id.slice("run_".length)}_assistant`,
+            seq: outputSeq,
             delta: event.delta,
-          }]);
+            createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
+          });
         } else if (event.type === "run.completed") {
           terminal = event;
         } else {
@@ -651,23 +658,11 @@ export class CanonicalChatOrchestrator {
           activityError.name,
         );
       }
-      const output = text ? CanonicalChatMessageSchema.parse({
-        id: `msg_${run.id.slice("run_".length)}_assistant`,
-        chatId: run.chatId,
-        seq: outputSeq,
-        role: "assistant",
-        state: terminal.outcome === "completed" ? "committed" : "failed",
-        turnId: run.turnId,
-        runId: run.id,
-        parts: [{ type: "text", text }],
-        createdAt: completedAt,
-      }) : undefined;
       await this.options.repository.finishRun(owner, {
         chatId: run.chatId,
         runId: run.id,
         outcome: terminal.outcome,
         completedAt,
-        ...(output ? { output } : {}),
       });
     } catch (error: unknown) {
       if (error instanceof ChatRunNotActiveError) return;

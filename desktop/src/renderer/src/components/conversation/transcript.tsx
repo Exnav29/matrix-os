@@ -130,6 +130,7 @@ function ResponseMessage({
   animateOnMount: boolean;
 }) {
   const previousMessageId = useRef(message.id);
+  const previousStreaming = useRef(streaming);
   const [visibleMarkdown, setVisibleMarkdown] = useState(() => (
     streaming || animateOnMount ? "" : message.markdown
   ));
@@ -139,6 +140,12 @@ function ResponseMessage({
     previousMessageId.current = message.id;
     setVisibleMarkdown(streaming || animateOnMount ? "" : message.markdown);
   }, [animateOnMount, message.id, message.markdown, streaming]);
+
+  useEffect(() => {
+    const terminalized = previousStreaming.current && !streaming;
+    previousStreaming.current = streaming;
+    if (terminalized) setVisibleMarkdown(message.markdown);
+  }, [message.markdown, streaming]);
 
   useEffect(() => {
     if (visibleMarkdown === message.markdown) return;
@@ -271,6 +278,12 @@ function ConversationTurn({
   const [expanded, setExpanded] = useState(false);
   const showWork = turn.active || expanded;
   const hasWork = turn.work.length > 0;
+  const terminalPartial = !turn.active
+    && turn.final?.kind === "notice"
+    && (turn.final.tone === "failed" || turn.final.tone === "stopped")
+    ? [...turn.work].reverse().find((item) => item.kind === "message")
+    : undefined;
+  const visibleWork = showWork ? turn.work : terminalPartial ? [terminalPartial] : [];
   return (
     <>
       {turn.user ? <UserMessage message={turn.user} callbacks={callbacks} /> : null}
@@ -284,9 +297,9 @@ function ConversationTurn({
           onToggle={() => setExpanded((value) => !value)}
         />
       ) : null}
-      {showWork ? turn.work.map((item) => (
+      {visibleWork.map((item) => (
         <PresentationItem key={item.id} item={item} callbacks={callbacks} />
-      )) : null}
+      ))}
       {turn.final ? (
         <PresentationItem
           item={turn.final}

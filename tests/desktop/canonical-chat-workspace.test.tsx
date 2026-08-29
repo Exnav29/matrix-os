@@ -739,6 +739,63 @@ describe("CanonicalChatWorkspace", () => {
     expect(reportedIds).toEqual([null]);
   });
 
+  it("does not let the previous Chat detail revert an external route change", async () => {
+    const nextRecord = {
+      ...record,
+      chat: {
+        ...record.chat,
+        id: "chat_next_route",
+        title: "Next routed chat",
+        revision: Math.max(0, record.chat.revision - 1),
+      },
+    };
+    const routeClient = client();
+    vi.mocked(routeClient.list).mockResolvedValue({ items: [record, nextRecord] });
+    vi.mocked(routeClient.getDetail).mockImplementation(async (chatId) => {
+      if (chatId === nextRecord.chat.id) return new Promise(() => undefined);
+      return {
+        record,
+        messages: snapshot.messages,
+        turns: snapshot.turns,
+        runs: snapshot.runs,
+        activities: snapshot.activities,
+      };
+    });
+    let navigate!: (chatId: string) => void;
+    let routedChatId = record.chat.id;
+
+    function Harness() {
+      const [chatId, setChatId] = useState(record.chat.id);
+      navigate = setChatId;
+      routedChatId = chatId;
+      return (
+        <CanonicalChatWorkspace
+          client={routeClient}
+          projectId={null}
+          initialChatId={chatId}
+          initialView="conversation"
+          active
+          catalog={providerCatalog}
+          externalNavigation
+          onActiveChatChanged={(nextChatId) => {
+            if (nextChatId) setChatId(nextChatId);
+          }}
+        />
+      );
+    }
+
+    render(<Harness />);
+    expect(await screen.findByRole("textbox", { name: "Reply to chat" })).toBeTruthy();
+
+    act(() => navigate(nextRecord.chat.id));
+    await waitFor(() => expect(routeClient.getDetail).toHaveBeenCalledWith(
+      nextRecord.chat.id,
+      { limit: 200 },
+    ));
+
+    expect(routedChatId).toBe(nextRecord.chat.id);
+  });
+
   it.each([
     ["starting another Chat in the same Project", false],
     ["deleting the last Chat in the Project", true],

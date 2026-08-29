@@ -13,12 +13,20 @@ import type {
 } from "../../components/conversation/presentation";
 
 function messageText(message: CanonicalChatMessage): string {
-  return message.parts.flatMap((part) => {
-    if (part.type === "text" || part.type === "summary") return [part.text];
-    if (part.type === "status") return [part.detail ? `${part.label}\n\n${part.detail}` : part.label];
-    if (part.type === "tool_result" && part.text) return [part.text];
-    return [];
-  }).join("\n\n");
+  let output = "";
+  let previousWasText = false;
+  for (const part of message.parts) {
+    const text = part.type === "text" || part.type === "summary"
+      ? part.text
+      : part.type === "status"
+        ? part.detail ? `${part.label}\n\n${part.detail}` : part.label
+        : part.type === "tool_result" && part.text ? part.text : undefined;
+    if (text === undefined) continue;
+    if (output && !(previousWasText && part.type === "text")) output += "\n\n";
+    output += text;
+    previousWasText = part.type === "text";
+  }
+  return output;
 }
 
 function messagePresentation(
@@ -62,7 +70,7 @@ function activityState(
 function runPresentation(
   run: CanonicalChatRun | undefined,
   activities: CanonicalChatRunActivity[],
-  hasCommittedAssistantMessage: boolean,
+  hasFinalAssistantMessage: boolean,
 ): {
   work: ConversationWorkPresentation[];
   streamingFinal?: ConversationMessagePresentation;
@@ -108,8 +116,10 @@ function runPresentation(
   const work: ConversationWorkPresentation[] = activityRows.length > 0
     ? [{ kind: "activity-group", id: `${run.id}:activities`, activities: activityRows }]
     : [];
+  const failed = run.status === "failed" || run.outcome === "failed";
+  const stopped = run.status === "aborted" || run.outcome === "aborted";
   const streamedMessage = [...streamed.entries()].at(-1);
-  const streamingFinal = !hasCommittedAssistantMessage && streamedMessage
+  const streamingFinal = !hasFinalAssistantMessage && !failed && !stopped && streamedMessage
     ? {
         kind: "message" as const,
         id: streamedMessage[0],
@@ -120,18 +130,22 @@ function runPresentation(
         timestamp: Date.parse(streamedMessage[1].occurredAt),
       }
     : undefined;
-  const failure = !hasCommittedAssistantMessage && !streamingFinal && runError
+  const terminalNotice = failed || stopped
     ? {
         kind: "notice" as const,
-        id: runError.id,
+        id: runError?.id ?? `${run.id}:terminal`,
         phase: "final" as const,
-        tone: "failed" as const,
-        label: "Agent work failed",
-        markdown: runError.error.safeMessage,
-        timestamp: Date.parse(runError.occurredAt),
+        tone: stopped ? "stopped" as const : "failed" as const,
+        label: stopped ? "Agent work stopped" : "Agent work failed",
+        markdown: stopped ? "Run was cancelled." : runError?.error.safeMessage ?? "The agent run failed.",
+        timestamp: Date.parse(runError?.occurredAt ?? run.completedAt ?? run.updatedAt),
       }
     : undefined;
-  return { work, ...(streamingFinal ? { streamingFinal } : {}), ...(failure ? { failure } : {}) };
+  return {
+    work,
+    ...(streamingFinal ? { streamingFinal } : {}),
+    ...(terminalNotice ? { failure: terminalNotice } : {}),
+  };
 }
 
 export function canonicalChatPresentation(input: {
@@ -148,10 +162,14 @@ export function canonicalChatPresentation(input: {
     const assistantMessages = input.messages.filter((message) => (
       message.turnId === turn.id && message.role === "assistant"
     ));
-    const finalMessage = assistantMessages.at(-1);
+    const terminalFailure = run?.status === "failed" || run?.status === "aborted"
+      || run?.outcome === "failed" || run?.outcome === "aborted";
+    const finalMessage = terminalFailure ? undefined : assistantMessages.at(-1);
     const live = runPresentation(run, input.activities, Boolean(finalMessage));
     const work = [
-      ...assistantMessages.slice(0, -1).map((message) => messagePresentation(message, "commentary")),
+      ...assistantMessages
+        .filter((message) => message.id !== finalMessage?.id)
+        .map((message) => messagePresentation(message, "commentary")),
       ...live.work,
     ];
     const startedAt = Date.parse(run?.startedAt ?? run?.createdAt ?? turn.createdAt);
