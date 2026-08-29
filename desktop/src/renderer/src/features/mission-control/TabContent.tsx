@@ -75,7 +75,7 @@ export function TabPane({
         initialChatTitle={tab.chatTitle}
       />;
     case "chat":
-      return <WorkTab route="chat" active={active} initialChatId={tab.chatId} initialChatView={tab.chatView} initialChatTitle={tab.chatTitle} />;
+      return <WorkTab tabId={tab.id} route="chat" active={active} initialChatId={tab.chatId} initialChatView={tab.chatView} initialChatTitle={tab.chatTitle} />;
     case "terminals":
       return <TerminalsTab active={active} visible={visible} />;
     case "files":
