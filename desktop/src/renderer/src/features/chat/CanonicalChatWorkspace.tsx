@@ -180,7 +180,7 @@ export function CanonicalChatWorkspace({
       && previous.projectId === projectId
     ) return;
     previousRoute.current = { initialChatId, initialView, projectId };
-    reportedChatId.current = initialChatId ?? null;
+    if (initialView === "draft") reportedChatId.current = initialChatId ?? null;
     if (projectId !== null) return;
     setGlobalView(initialView ?? (initialChatId ? "conversation" : "index"));
   }, [initialChatId, initialView, projectId]);
@@ -223,10 +223,12 @@ export function CanonicalChatWorkspace({
 
   useEffect(() => {
     const record = controller.detail?.record;
-    if (!record || reportedChatId.current === record.chat.id) return;
+    // A parent-owned draft route can arrive one effect before the previous
+    // detail is cleared. Only explicit draft actions may promote a Chat.
+    if (initialView === "draft" || !record || reportedChatId.current === record.chat.id) return;
     reportedChatId.current = record.chat.id;
     onActiveChatChanged?.(record.chat.id, record.chat.title);
-  }, [controller.detail?.record, onActiveChatChanged]);
+  }, [controller.detail?.record, initialView, onActiveChatChanged]);
 
   const context = projectContext(
     controller.detail?.record.projectId ?? draftProjectId ?? projectId ?? undefined,
