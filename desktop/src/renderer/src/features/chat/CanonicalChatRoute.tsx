@@ -145,13 +145,6 @@ export function CanonicalChatRoute({
       renderInspector={renderInspector}
       inspectorExclusive={inspectorExclusive}
       onActiveChatChanged={(chatId, title) => {
-        if (chatId) {
-          useTabs.getState().recordRecentCanonicalChat(
-            chatId,
-            title ?? "Chat",
-            canonicalProjectId,
-          );
-        }
         if (projectId === null) {
           if (tabId) {
             useTabs.getState().updateChatRoute(tabId, {
@@ -179,7 +172,6 @@ export function CanonicalChatRoute({
         });
       }}
       onProjectChanged={(chatId, targetProjectId, title) => {
-        useTabs.getState().recordRecentCanonicalChat(chatId, title, targetProjectId);
         if (targetProjectId === null) {
           if (tabId) {
             useTabs.getState().updateChatRoute(tabId, {
@@ -204,7 +196,6 @@ export function CanonicalChatRoute({
           title: project?.name ?? projectSlug,
         });
       }}
-      onChatDeleted={(chatId) => useTabs.getState().removeRecentView("conversation", chatId)}
     />
   );
 }
