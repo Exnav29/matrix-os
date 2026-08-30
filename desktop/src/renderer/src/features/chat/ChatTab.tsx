@@ -1,6 +1,8 @@
 import type { AgentProviderSummary, CanonicalChatDetailResponse } from "@matrix-os/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ConversationTranscript } from "../../components/conversation/transcript";
+import { CHAT_CONTENT_WIDTH_CLASS } from "../../components/conversation/layout";
+import { cn } from "../../lib/cn";
 import type { CanonicalChatEventSource } from "../../lib/canonical-chat-client";
 import { openFileInDesktopEditor } from "../editor/desktop-editor-store";
 import { Button } from "../../design/primitives";
@@ -52,7 +54,7 @@ export function canSubmitChatDraft(
     && !contextBlocksSend;
 }
 
-export function HermesPane() {
+export function HermesPane({ active = true }: { active?: boolean } = {}) {
   const api = useConnection((state) => state.api);
   const messages = useHermesChat((state) => state.messages);
   const sessionId = useHermesChat((state) => state.sessionId);
@@ -80,7 +82,7 @@ export function HermesPane() {
     () => createLegacyGlobalProviderCatalog({ hasProject: projects.length > 0 }),
     [projects.length],
   );
-  const canonicalProviderCatalog = useChatProviderCatalog(fallbackCatalog).catalog;
+  const canonicalProviderCatalog = useChatProviderCatalog(fallbackCatalog, { active }).catalog;
   const providerCatalog = useMemo(
     () => filterCatalogForLegacyGlobal(canonicalProviderCatalog),
     [canonicalProviderCatalog],
@@ -264,7 +266,7 @@ export function HermesPane() {
   );
 
   const loadErrorBanner = loadError ? (
-    <div role="alert" className="mx-auto mt-3 w-[calc(100%-2.5rem)] max-w-[868px] rounded-lg border px-3 py-2 text-sm" style={{ borderColor: "var(--border-subtle)", color: "var(--text-secondary)" }}>
+    <div role="alert" className={cn("mx-auto mt-3 w-[calc(100%-2.5rem)] rounded-lg border px-3 py-2 text-sm", CHAT_CONTENT_WIDTH_CLASS)} style={{ borderColor: "var(--border-subtle)", color: "var(--text-secondary)" }}>
       {loadError}
     </div>
   ) : null;
@@ -277,7 +279,7 @@ export function HermesPane() {
     >
       {loadErrorBanner}
       {empty ? (
-        <div data-testid="chat-empty-content" className="mx-auto flex min-h-0 w-full max-w-[868px] flex-1 flex-col justify-center gap-[26px] px-5 py-8">
+        <div data-testid="chat-empty-content" className={cn("mx-auto flex min-h-0 w-full flex-1 flex-col justify-center gap-[26px] px-5 py-8", CHAT_CONTENT_WIDTH_CLASS)}>
           <div className="flex shrink-0 flex-col items-center gap-[26px] text-center">
             <h1
               className="text-[32px] font-semibold leading-tight tracking-[-0.02em]"
@@ -292,7 +294,7 @@ export function HermesPane() {
       ) : (
         <>
           <ConversationTranscript turns={turns} callbacks={{ copyText, openFile: openFileInDesktopEditor }} />
-          <div className="mx-auto w-full max-w-[868px] shrink-0 px-5 pb-5">
+          <div className={cn("mx-auto w-full shrink-0 px-5 pb-5", CHAT_CONTENT_WIDTH_CLASS)}>
             {renderComposer("Reply to Hermes…")}
           </div>
         </>
@@ -301,7 +303,7 @@ export function HermesPane() {
   );
 }
 
-function LegacyChatTab() {
+function LegacyChatTab({ active }: { active: boolean }) {
   const api = useConnection((state) => state.api);
   const conversationView = useHermesChat((state) => state.view);
   const indexStatus = useHermesChat((state) => state.indexStatus);
@@ -334,7 +336,7 @@ function LegacyChatTab() {
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-      {conversationView === "index" ? <HermesConversationIndex api={api} /> : <HermesPane />}
+      {conversationView === "index" ? <HermesConversationIndex api={api} /> : <HermesPane active={active} />}
     </div>
   );
 }
@@ -395,7 +397,7 @@ export default function ChatTab({
       renderInspector={renderInspector}
       inspectorExclusive={inspectorExclusive}
       fallback={allowLegacyFallback
-        ? <LegacyChatTab />
+        ? <LegacyChatTab active={active} />
         : <ChatUnavailableState onRetry={() => setRouteAttempt((attempt) => attempt + 1)} />}
     />
   );
