@@ -2,12 +2,29 @@
 
 import React from "react";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CronSection from "../../desktop/src/renderer/src/features/settings/sections/CronSection";
 import SystemSection from "../../desktop/src/renderer/src/features/settings/sections/SystemSection";
-import { createDesktopQueryClient } from "../../desktop/src/renderer/src/lib/query-client";
+import {
+  createDesktopQueryClient,
+  QueryClientProvider,
+} from "../../desktop/src/renderer/src/lib/query-client";
 import { useConnection } from "../../desktop/src/renderer/src/stores/connection";
+
+function renderSettingsSection(Component: React.ComponentType) {
+  const queryClient = createDesktopQueryClient();
+  queryClient.setDefaultOptions({
+    queries: {
+      ...queryClient.getDefaultOptions().queries,
+      retry: false,
+    },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <Component />
+    </QueryClientProvider>,
+  );
+}
 
 function makeApi(response: unknown, reject = false) {
   return {
@@ -29,15 +46,6 @@ function makePendingApi() {
     delete: vi.fn(),
     putText: vi.fn(),
   } as never;
-}
-
-function renderSettingsSection(Component: React.ComponentType) {
-  const queryClient = createDesktopQueryClient();
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <Component />
-    </QueryClientProvider>,
-  );
 }
 
 describe("settings data sections", () => {
@@ -80,7 +88,10 @@ describe("settings data sections", () => {
     }, { timeout: 2_500 });
 
     await act(async () => {
-      useConnection.setState({ api: makeApi(response) });
+      useConnection.setState({
+        api: makeApi(response),
+        authGeneration: useConnection.getState().authGeneration + 1,
+      });
     });
 
     await waitFor(() => {
