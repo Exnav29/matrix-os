@@ -1,16 +1,18 @@
 // @vitest-environment jsdom
 
 import React from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeSummary } from "@matrix-os/contracts";
+import { defaultAgentThreadComposerDraft, type RuntimeSummary } from "@matrix-os/contracts";
 import { ProjectChatDraft } from "@desktop/renderer/src/features/project/ProjectChatDraft";
 import { useCodingAgentWorkspace } from "@desktop/renderer/src/stores/coding-agent-workspace";
 import { useConnection } from "@desktop/renderer/src/stores/connection";
+import { useDraftChat } from "@desktop/renderer/src/stores/draft-chat";
 import { useProjectWorkspaces } from "@desktop/renderer/src/stores/project-workspaces";
 import { useProviderPreferences } from "@desktop/renderer/src/features/settings/provider-preferences";
 import { AppError } from "@desktop/shared/app-error";
 import { setSharedComposerText } from "./shared-chat-composer-test-utils";
+import { resetProviderPreferences } from "./provider-preferences-test-utils";
 
 const catalogMock = vi.hoisted(() => ({ attachments: true }));
 vi.mock("@desktop/renderer/src/features/chat/chat-provider-catalog", async (importOriginal) => {
@@ -45,6 +47,16 @@ const summary: RuntimeSummary = {
     supportedModes: ["default"],
     defaultMode: "default",
     setupActions: [],
+  }, {
+    id: "claude",
+    kind: "claude",
+    displayName: "Claude Code",
+    availability: "available",
+    installStatus: "installed",
+    authStatus: "authenticated",
+    supportedModes: ["default"],
+    defaultMode: "default",
+    setupActions: [],
   }],
   projects: { items: [], hasMore: false, limit: 20 },
   activeThreads: { items: [], hasMore: false, limit: 20 },
@@ -66,10 +78,11 @@ describe("ProjectChatDraft send failures", () => {
     } as typeof ResizeObserver;
     useConnection.setState({ api: null });
     useCodingAgentWorkspace.setState(useCodingAgentWorkspace.getInitialState(), true);
+    useDraftChat.setState({ entries: {} });
     useProjectWorkspaces.setState({
       resolveNewChatTarget: vi.fn(async () => ({ projectId: "matrix-os" })),
     });
-    useProviderPreferences.setState({ composerSelections: {}, hydrated: true });
+    resetProviderPreferences({ hydrated: true });
     Object.defineProperty(window, "operator", {
       configurable: true,
       value: {
@@ -86,6 +99,173 @@ describe("ProjectChatDraft send failures", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("restores the last Provider Instance and model in a canonical Project Chat draft", async () => {
+    resetProviderPreferences({
+      hydrated: true,
+      lastComposerInstanceId: "claude_code_default",
+      composerSelections: {
+        claude_code_default: {
+          model: "provider-default",
+          options: [],
+          permissionMode: "supervised",
+        },
+      },
+    });
+
+    render(
+      <ProjectChatDraft
+        summary={summary}
+        projectId="matrix-os"
+        projectLabel="Matrix OS"
+        active={false}
+        seed={null}
+        focusRequestId={0}
+        typeToStartEnabled={false}
+        onCreated={vi.fn()}
+        canonicalClient={{} as never}
+      />,
+    );
+
+    await screen.findByRole("textbox", { name: "Message new chat" });
+    const picker = screen.getByRole("button", { name: "Choose model and provider" });
+    expect(picker.getAttribute("data-provider-instance")).toBe("claude_code_default");
+    expect(picker.getAttribute("data-model")).toBe("provider-default");
+  });
+
+  it("keeps an explicitly selected restored draft provider ahead of the global default", async () => {
+    const summaryWithModels: RuntimeSummary = {
+      ...summary,
+      providers: summary.providers.map((provider) => ({
+        ...provider,
+        defaultModel: provider.id === "claude" ? "claude-sonnet-4.6" : "gpt-5.6",
+      })),
+    };
+    useDraftChat.getState().setDraft("matrix-os", {
+      ...defaultAgentThreadComposerDraft(summaryWithModels),
+      providerId: "claude",
+      prompt: "Continue the restored draft",
+    }, true);
+    resetProviderPreferences({
+      hydrated: true,
+      lastComposerInstanceId: "codex_default",
+      composerSelections: {
+        codex_default: {
+          model: "gpt-5.6",
+          options: [{ id: "effort", value: "high" }],
+          permissionMode: "supervised",
+        },
+      },
+    });
+
+    render(
+      <ProjectChatDraft
+        summary={summaryWithModels}
+        projectId="matrix-os"
+        projectLabel="Matrix OS"
+        active={false}
+        seed={null}
+        focusRequestId={0}
+        typeToStartEnabled={false}
+        onCreated={vi.fn()}
+        canonicalClient={{} as never}
+      />,
+    );
+
+    const picker = await screen.findByRole("button", { name: "Choose model and provider" });
+    expect(picker.getAttribute("data-provider-instance")).toBe("claude_code_default");
+    expect(picker.getAttribute("data-model")).toBe("claude-sonnet-4.6");
+  });
+
+  it("applies the global default to a restored draft without explicit picker intent", async () => {
+    const summaryWithModels: RuntimeSummary = {
+      ...summary,
+      providers: summary.providers.map((provider) => ({
+        ...provider,
+        defaultModel: provider.id === "claude" ? "claude-sonnet-4.6" : "gpt-5.6",
+      })),
+    };
+    useDraftChat.getState().setDraft("matrix-os", {
+      ...defaultAgentThreadComposerDraft(summaryWithModels),
+      providerId: "claude",
+      prompt: "Continue the untouched restored draft",
+    });
+    resetProviderPreferences({
+      hydrated: true,
+      lastComposerInstanceId: "codex_default",
+      composerSelections: {
+        codex_default: {
+          model: "gpt-5.6",
+          options: [{ id: "effort", value: "high" }],
+          permissionMode: "supervised",
+        },
+      },
+    });
+
+    render(
+      <ProjectChatDraft
+        summary={summaryWithModels}
+        projectId="matrix-os"
+        projectLabel="Matrix OS"
+        active={false}
+        seed={null}
+        focusRequestId={0}
+        typeToStartEnabled={false}
+        onCreated={vi.fn()}
+        canonicalClient={{} as never}
+      />,
+    );
+
+    const picker = await screen.findByRole("button", { name: "Choose model and provider" });
+    expect(picker.getAttribute("data-provider-instance")).toBe("codex_default");
+    expect(picker.getAttribute("data-model")).toBe("gpt-5.6");
+  });
+
+  it("applies a remembered effort after preferences hydrate on a cold mount", async () => {
+    resetProviderPreferences();
+    let resolveStateGet!: (result: { value: unknown }) => void;
+    const stateGet = new Promise<{ value: unknown }>((resolve) => {
+      resolveStateGet = resolve;
+    });
+    window.operator.invoke = vi.fn((channel: string) => {
+      if (channel === "state:get") return stateGet;
+      if (channel === "state:set") return Promise.resolve({ ok: true });
+      return Promise.reject(new Error(`unexpected channel ${channel}`));
+    });
+
+    render(
+      <ProjectChatDraft
+        summary={summary}
+        projectId="matrix-os"
+        projectLabel="Matrix OS"
+        active={false}
+        seed={null}
+        focusRequestId={0}
+        typeToStartEnabled={false}
+        onCreated={vi.fn()}
+        canonicalClient={{} as never}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Reasoning" }).textContent).toContain("Low");
+    resolveStateGet({
+      value: {
+        defaultProviderId: null,
+        lastComposerInstanceId: "codex_default",
+        composerSelections: {
+          codex_default: {
+            model: "provider-default",
+            options: [{ id: "effort", value: "high" }],
+            permissionMode: "supervised",
+          },
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Reasoning" }).textContent).toContain("High");
+    });
   });
 
   it("shows the upload reason and keeps the draft for retry", async () => {
