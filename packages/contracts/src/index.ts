@@ -23,7 +23,9 @@ import {
 
 export const CODEX_VERIFIED_VERSION = "0.152.0";
 export const CODEX_VERIFIED_NPM_PACKAGE = `@openai/codex@${CODEX_VERIFIED_VERSION}`;
+export * from "#ai-provider";
 export * from "#billing-catalog";
+export * from "#ai-provider";
 export * from "#agent-runtime-config";
 export * from "#agent-thread-contracts";
 export * from "#canonical-chat";
@@ -40,6 +42,8 @@ export * from "#canonical-chat-surface";
 export * from "#hermes-configuration";
 export * from "#kernel-result";
 export * from "#kernel-conversations";
+export * from "#provider-settings";
+export * from "#funded-ai";
 export * from "#safe-client-error";
 export * from "#terminal-clipboard";
 export * from "#terminal-links";
