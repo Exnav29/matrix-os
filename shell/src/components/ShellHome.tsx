@@ -18,6 +18,7 @@ import { CommandPalette } from "@/components/CommandPalette";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { useMobileViewport } from "@/hooks/useMobileViewport";
 import { createShellSnapshotScope } from "@/lib/shell-snapshot-cache";
+import { isSelfHostedRuntime, SELF_HOSTED_SHELL_USER_ID } from "@/lib/self-host-mode";
 
 const LAUNCHABLE_BUILT_IN_PATHS = new Set([
   "__terminal__",
@@ -50,9 +51,38 @@ function readRuntimeSlotFromLocation(): string | null {
   return new URLSearchParams(window.location.search).get("runtime");
 }
 
-export function ShellHome({ initialCollaborationView }: { initialCollaborationView?: ChatCollaborationView } = {}) {
-  const isMobile = useMobileViewport();
+type ShellHomeProps = { initialCollaborationView?: ChatCollaborationView };
+
+export function ShellHome({ initialCollaborationView }: ShellHomeProps = {}) {
+  if (isSelfHostedRuntime()) {
+    return (
+      <ShellHomeBody
+        userId={SELF_HOSTED_SHELL_USER_ID}
+        sessionId={null}
+        initialCollaborationView={initialCollaborationView}
+      />
+    );
+  }
+  return <ClerkShellHome initialCollaborationView={initialCollaborationView} />;
+}
+
+function ClerkShellHome({ initialCollaborationView }: ShellHomeProps) {
   const { userId, sessionId } = useAuth();
+  return (
+    <ShellHomeBody
+      userId={userId}
+      sessionId={sessionId}
+      initialCollaborationView={initialCollaborationView}
+    />
+  );
+}
+
+function ShellHomeBody({
+  userId,
+  sessionId,
+  initialCollaborationView,
+}: ShellHomeProps & { userId: string | null | undefined; sessionId: string | null | undefined }) {
+  const isMobile = useMobileViewport();
   const cachePathname = typeof window === "undefined" ? "/" : window.location.pathname;
   const cacheScope = createShellSnapshotScope({ userId, pathname: cachePathname });
   useTheme({ cacheScope });
