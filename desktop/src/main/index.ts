@@ -329,6 +329,7 @@ if (!gotLock) {
           if (version !== app.getVersion()) return;
           await store.acknowledgeDesktopUpdateRelease(version);
         },
+        getAppVersion: () => app.getVersion(),
         fetchRuntimeSummary: () => fetchCodingAgentRuntimeSummary(auth),
         fetchProjectWorkspace: (request) => fetchCodingAgentProjectWorkspace(auth, request),
         fetchNotificationPreferences: () => fetchCodingAgentNotificationPreferences(auth),

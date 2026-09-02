@@ -1,6 +1,12 @@
 import "posthog-js/dist/conversations";
 import posthog from "posthog-js/dist/module.no-external";
+import {
+  buildSupportChatProperties,
+  type SupportChatProperties,
+} from "@matrix-os/contracts";
 import { DESKTOP_ANALYTICS_EVENT, isDesktopAnalyticsName, type DesktopAnalyticsDetail } from "../../lib/desktop-analytics";
+import type { ApiClient } from "../../lib/api";
+import { invoke } from "../../lib/operator";
 import { useEffect } from "react";
 import { useConnection } from "../../stores/connection";
 import { useUi } from "../../stores/ui";
@@ -48,6 +54,39 @@ function relayUrl(platformHost: string): string | null {
     if (error instanceof TypeError) return null;
     throw error;
   }
+}
+
+async function loadDesktopSupportProperties(api: ApiClient): Promise<SupportChatProperties> {
+  const [systemInfoResult, desktopVersionResult] = await Promise.allSettled([
+    api.get<unknown>("/api/system/info"),
+    invoke("app:get-version", {}),
+  ]);
+  if (systemInfoResult.status === "rejected") {
+    console.warn(
+      "[desktop-support] Runtime metadata unavailable:",
+      errorKind(systemInfoResult.reason),
+    );
+  }
+  if (desktopVersionResult.status === "rejected") {
+    console.warn(
+      "[desktop-support] Native app version unavailable:",
+      errorKind(desktopVersionResult.reason),
+    );
+  }
+  return buildSupportChatProperties({
+    client: "desktop",
+    systemInfo: systemInfoResult.status === "fulfilled" ? systemInfoResult.value : undefined,
+    desktopVersion: desktopVersionResult.status === "fulfilled"
+      ? desktopVersionResult.value.version
+      : undefined,
+  });
+}
+
+function applyDesktopSupportProperties(properties: SupportChatProperties): void {
+  if (!properties.matrix_bundle_version) posthog.unregister("matrix_bundle_version");
+  if (!properties.matrix_desktop_version) posthog.unregister("matrix_desktop_version");
+  posthog.register(properties);
+  posthog.setPersonProperties(properties);
 }
 
 function hidePostHogWidget(): void {
@@ -228,11 +267,13 @@ export default function DesktopSupportWidget() {
   const displayName = useConnection((state) => state.displayName);
   const platformHost = useConnection((state) => state.platformHost);
   const authGeneration = useConnection((state) => state.authGeneration);
+  const api = useConnection((state) => state.api);
 
   useEffect(() => {
+    let cancelled = false;
     const token = configuredToken();
     const apiHost = relayUrl(platformHost);
-    if (!token || status !== "signed-in" || !handle || !apiHost) {
+    if (!token || status !== "signed-in" || !handle || !apiHost || !api) {
       hideAndResetSupport();
       return;
     }
@@ -288,25 +329,39 @@ export default function DesktopSupportWidget() {
 
     const identity = `${handle}:${authGeneration}`;
     if (activeIdentity === identity) return;
-    try {
-      if (activeIdentity !== null) {
-        invalidatePendingSupportOpen();
-        allowPostHogWidget = false;
-        hidePostHogWidget();
-        posthog.reset();
-        activeIdentity = null;
-      }
-      posthog.identify(handle, {
-        $name: displayName ?? handle,
-        matrix_client: "desktop",
-      });
-      activeIdentity = identity;
+    if (activeIdentity !== null) {
+      invalidatePendingSupportOpen();
+      allowPostHogWidget = false;
       hidePostHogWidget();
-      suppressDefaultLauncher();
-    } catch (error: unknown) {
-      console.warn("[desktop-support] PostHog identification failed:", errorKind(error));
+      try {
+        posthog.reset();
+      } catch (error: unknown) {
+        console.warn("[desktop-support] Failed to reset PostHog identity:", errorKind(error));
+      }
+      activeIdentity = null;
     }
-  }, [authGeneration, displayName, handle, platformHost, status]);
+    const generation = supportLifecycleGeneration;
+
+    void loadDesktopSupportProperties(api).then((properties) => {
+      if (cancelled || generation !== supportLifecycleGeneration) return;
+      try {
+        applyDesktopSupportProperties(properties);
+        posthog.identify(handle, {
+          $name: displayName ?? handle,
+          ...properties,
+        });
+        activeIdentity = identity;
+        hidePostHogWidget();
+        suppressDefaultLauncher();
+      } catch (error: unknown) {
+        console.warn("[desktop-support] PostHog identification failed:", errorKind(error));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [api, authGeneration, displayName, handle, platformHost, status]);
 
   useEffect(() => {
     const capture = (event: Event) => {
