@@ -107,6 +107,9 @@ describe("self-host server installer", () => {
     expect(script).toContain('if (\\$arg_reconnectionToken != "")');
     expect(script).toContain("error_page 418 = @matrix_code_root_ws");
     expect(script).toContain("proxy_set_header X-Forwarded-Prefix /code");
+    expect(script.match(/proxy_set_header Host \\$host;/g)).toHaveLength(3);
+    expect(script.match(/proxy_set_header X-Forwarded-Host \\$host;/g)).toHaveLength(3);
+    expect(script.match(/proxy_set_header X-Forwarded-Proto \\$scheme;/g)).toHaveLength(3);
     expect(script).toContain("proxy_read_timeout 3600s");
     expect(script).toContain("proxy_pass http://127.0.0.1:8788");
     expect(script).toContain("proxy_pass http://127.0.0.1:3000");
