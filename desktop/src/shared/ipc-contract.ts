@@ -150,17 +150,30 @@ export const INVOKE_CHANNELS = {
   },
   "auth:status": {
     request: Empty,
-    response: z
-      .object({
-        signedIn: z.boolean(),
-        handle: z.string().max(64).optional(),
+    response: z.discriminatedUnion("signedIn", [
+      z.object({
+        signedIn: z.literal(true),
+        handle: z.string().min(1).max(64),
+        userId: z.string().min(1).max(128),
         displayName: z.string().max(256).optional(),
         imageUrl: z.string().url().max(2048).optional(),
+        email: z.email().max(320).optional(),
         runtimeSlot: z.string().max(64),
         platformHost: z.string().max(256),
         authGeneration: z.number().int().nonnegative(),
-      })
-      .strict(),
+      }).strict(),
+      z.object({
+        signedIn: z.literal(false),
+        handle: z.never().optional(),
+        userId: z.never().optional(),
+        displayName: z.never().optional(),
+        imageUrl: z.never().optional(),
+        email: z.never().optional(),
+        runtimeSlot: z.string().max(64),
+        platformHost: z.string().max(256),
+        authGeneration: z.number().int().nonnegative(),
+      }).strict(),
+    ]),
   },
   "auth:sign-out": { request: Empty, response: Ok },
   "auth:session-expired": { request: Empty, response: Ok },

@@ -95,7 +95,9 @@ describe("Desktop support widget", () => {
     useConnection.setState({
       status: "signed-in",
       handle: "neo",
+      userId: "user_2abcDEF",
       displayName: "Neo",
+      email: "neo@example.com",
       platformHost: "https://app.matrix-os.com",
       authGeneration: 1,
       api: runtimeApi as never,
@@ -110,8 +112,10 @@ describe("Desktop support widget", () => {
       useConnection.setState({
         status: "signed-out",
         handle: null,
+        userId: null,
         displayName: null,
         imageUrl: null,
+        email: null,
         api: null,
       });
       await Promise.resolve();
@@ -176,8 +180,9 @@ describe("Desktop support widget", () => {
         persistence_name: "matrix_os_desktop_support",
       }),
     );
-    expect(posthogClient.identify).toHaveBeenCalledWith("neo", {
+    expect(posthogClient.identify).toHaveBeenCalledWith("user_2abcDEF", {
       $name: "Neo",
+      email: "neo@example.com",
       matrix_client: "desktop",
       matrix_bundle_version: "v2026.09.02-running",
       matrix_desktop_version: "1.4.0-canary.2",
@@ -198,8 +203,10 @@ describe("Desktop support widget", () => {
       useConnection.setState({
         status: "signed-out",
         handle: null,
+        userId: null,
         displayName: null,
         imageUrl: null,
+        email: null,
         api: null,
       });
     });
@@ -288,8 +295,9 @@ describe("Desktop support widget", () => {
   it("rebinds support to the selected runtime relay", async () => {
     render(<DesktopSupportWidget />);
 
-    await waitFor(() => expect(posthogClient.identify).toHaveBeenCalledWith("neo", {
+    await waitFor(() => expect(posthogClient.identify).toHaveBeenCalledWith("user_2abcDEF", {
       $name: "Neo",
+      email: "neo@example.com",
       matrix_client: "desktop",
       matrix_bundle_version: "v2026.09.02-running",
       matrix_desktop_version: "1.4.0-canary.2",
@@ -312,8 +320,9 @@ describe("Desktop support widget", () => {
       });
     });
     expect(posthogClient.reset).toHaveBeenCalledTimes(1);
-    expect(posthogClient.identify).toHaveBeenLastCalledWith("neo", {
+    expect(posthogClient.identify).toHaveBeenLastCalledWith("user_2abcDEF", {
       $name: "Neo",
+      email: "neo@example.com",
       matrix_client: "desktop",
       matrix_bundle_version: "v2026.09.03-preview",
       matrix_desktop_version: "1.4.0-canary.2",
@@ -325,6 +334,26 @@ describe("Desktop support widget", () => {
     });
   });
 
+  it("updates person metadata without resetting the same Clerk identity", async () => {
+    render(<DesktopSupportWidget />);
+    await waitFor(() => expect(posthogClient.identify).toHaveBeenCalledTimes(1));
+    const resetCalls = posthogClient.reset.mock.calls.length;
+
+    act(() => {
+      useConnection.setState({
+        displayName: "The One",
+        email: "the-one@example.com",
+      });
+    });
+
+    await waitFor(() => expect(posthogClient.setPersonProperties).toHaveBeenLastCalledWith({
+      $name: "The One",
+      email: "the-one@example.com",
+    }));
+    expect(posthogClient.identify).toHaveBeenCalledTimes(1);
+    expect(posthogClient.reset).toHaveBeenCalledTimes(resetCalls);
+  });
+
   it("keeps support available when runtime and native version metadata are unavailable", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     runtimeApi.get.mockRejectedValueOnce(new Error("private runtime failure"));
@@ -332,8 +361,9 @@ describe("Desktop support widget", () => {
 
     render(<DesktopSupportWidget />);
 
-    await waitFor(() => expect(posthogClient.identify).toHaveBeenCalledWith("neo", {
+    await waitFor(() => expect(posthogClient.identify).toHaveBeenCalledWith("user_2abcDEF", {
       $name: "Neo",
+      email: "neo@example.com",
       matrix_client: "desktop",
     }));
     expect(posthogClient.register).toHaveBeenCalledWith({ matrix_client: "desktop" });
@@ -384,8 +414,10 @@ describe("Desktop support widget", () => {
       useConnection.setState({
         status: "signed-out",
         handle: null,
+        userId: null,
         displayName: null,
         imageUrl: null,
+        email: null,
         api: null,
       });
     });

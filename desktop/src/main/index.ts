@@ -203,9 +203,11 @@ if (!gotLock) {
         onAuthChanged: (status) => {
           sendEvent("auth:changed", {
             signedIn: status.signedIn,
-            ...(status.handle ? { handle: status.handle } : {}),
-            ...(status.displayName ? { displayName: status.displayName } : {}),
-            ...(status.imageUrl ? { imageUrl: status.imageUrl } : {}),
+            ...(status.signedIn ? {
+              handle: status.handle,
+              ...(status.displayName ? { displayName: status.displayName } : {}),
+              ...(status.imageUrl ? { imageUrl: status.imageUrl } : {}),
+            } : {}),
           });
         },
       });

@@ -264,7 +264,9 @@ function hideAndResetSupport(): void {
 export default function DesktopSupportWidget() {
   const status = useConnection((state) => state.status);
   const handle = useConnection((state) => state.handle);
+  const userId = useConnection((state) => state.userId);
   const displayName = useConnection((state) => state.displayName);
+  const email = useConnection((state) => state.email);
   const platformHost = useConnection((state) => state.platformHost);
   const authGeneration = useConnection((state) => state.authGeneration);
   const api = useConnection((state) => state.api);
@@ -273,7 +275,7 @@ export default function DesktopSupportWidget() {
     let cancelled = false;
     const token = configuredToken();
     const apiHost = relayUrl(platformHost);
-    if (!token || status !== "signed-in" || !handle || !apiHost || !api) {
+    if (!token || status !== "signed-in" || !handle || !userId || !apiHost || !api) {
       hideAndResetSupport();
       return;
     }
@@ -327,8 +329,18 @@ export default function DesktopSupportWidget() {
       }
     }
 
-    const identity = `${handle}:${authGeneration}`;
-    if (activeIdentity === identity) return;
+    const identity = `${userId}:${authGeneration}`;
+    if (activeIdentity === identity) {
+      try {
+        posthog.setPersonProperties({
+          $name: displayName ?? handle,
+          ...(email ? { email } : {}),
+        });
+      } catch (error: unknown) {
+        console.warn("[desktop-support] PostHog profile update failed:", errorKind(error));
+      }
+      return;
+    }
     if (activeIdentity !== null) {
       invalidatePendingSupportOpen();
       allowPostHogWidget = false;
@@ -346,8 +358,9 @@ export default function DesktopSupportWidget() {
       if (cancelled || generation !== supportLifecycleGeneration) return;
       try {
         applyDesktopSupportProperties(properties);
-        posthog.identify(handle, {
+        posthog.identify(userId, {
           $name: displayName ?? handle,
+          ...(email ? { email } : {}),
           ...properties,
         });
         activeIdentity = identity;
@@ -361,7 +374,7 @@ export default function DesktopSupportWidget() {
     return () => {
       cancelled = true;
     };
-  }, [api, authGeneration, displayName, handle, platformHost, status]);
+  }, [api, authGeneration, displayName, email, handle, platformHost, status, userId]);
 
   useEffect(() => {
     const capture = (event: Event) => {
