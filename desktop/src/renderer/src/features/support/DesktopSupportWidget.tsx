@@ -334,7 +334,7 @@ export default function DesktopSupportWidget() {
       try {
         posthog.setPersonProperties({
           $name: displayName ?? handle,
-          ...(email ? { email } : {}),
+          email: email ?? null,
         });
       } catch (error: unknown) {
         console.warn("[desktop-support] PostHog profile update failed:", errorKind(error));
@@ -360,7 +360,7 @@ export default function DesktopSupportWidget() {
         applyDesktopSupportProperties(properties);
         posthog.identify(userId, {
           $name: displayName ?? handle,
-          ...(email ? { email } : {}),
+          email: email ?? null,
           ...properties,
         });
         activeIdentity = identity;

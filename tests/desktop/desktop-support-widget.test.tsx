@@ -215,6 +215,20 @@ describe("Desktop support widget", () => {
     expect(posthogClient.reset).toHaveBeenCalledTimes(1);
   });
 
+  it("clears a stale email during initial Clerk identification", async () => {
+    useConnection.setState({ email: null });
+
+    render(<DesktopSupportWidget />);
+
+    await waitFor(() => expect(posthogClient.identify).toHaveBeenCalledWith("user_2abcDEF", {
+      $name: "Neo",
+      email: null,
+      matrix_client: "desktop",
+      matrix_bundle_version: "v2026.09.02-running",
+      matrix_desktop_version: "1.4.0-canary.2",
+    }));
+  });
+
   it("opens support from beside the avatar without leaving the default launcher", async () => {
     posthogClient.conversations.hide.mockImplementation(() => {
       document.getElementById("ph-conversations-widget-container")?.remove();
@@ -349,6 +363,23 @@ describe("Desktop support widget", () => {
     await waitFor(() => expect(posthogClient.setPersonProperties).toHaveBeenLastCalledWith({
       $name: "The One",
       email: "the-one@example.com",
+    }));
+    expect(posthogClient.identify).toHaveBeenCalledTimes(1);
+    expect(posthogClient.reset).toHaveBeenCalledTimes(resetCalls);
+  });
+
+  it("clears a stale email without resetting the same Clerk identity", async () => {
+    render(<DesktopSupportWidget />);
+    await waitFor(() => expect(posthogClient.identify).toHaveBeenCalledTimes(1));
+    const resetCalls = posthogClient.reset.mock.calls.length;
+
+    act(() => {
+      useConnection.setState({ email: null });
+    });
+
+    await waitFor(() => expect(posthogClient.setPersonProperties).toHaveBeenLastCalledWith({
+      $name: "Neo",
+      email: null,
     }));
     expect(posthogClient.identify).toHaveBeenCalledTimes(1);
     expect(posthogClient.reset).toHaveBeenCalledTimes(resetCalls);
