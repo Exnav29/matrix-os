@@ -1,16 +1,41 @@
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { parse as parseYaml } from "./yaml.js";
+import { NativeAgentRoutingSchema, type NativeAgentRouting } from "@matrix-os/contracts";
+
+/**
+ * Claude model aliases the SDK accepts at config time, plus "inherit"
+ * (use the parent kernel session's model). Confirmed against the installed
+ * @anthropic-ai/claude-agent-sdk@0.3.240 type surface (sdk.d.ts) -- the SDK
+ * also accepts a full Claude model ID (e.g. "claude-fable-5") here, which
+ * `SAFE_CLAUDE_MODEL_ID` below covers; this union stays for documentation/
+ * autocomplete on the common cases.
+ */
+export type ClaudeModelValue = "opus" | "sonnet" | "haiku" | "fable" | "inherit" | (string & {});
+
+/** Bounded full Claude model ID, e.g. "claude-opus-5", "claude-fable-5". */
+export const SAFE_CLAUDE_MODEL_ID = /^claude-[a-z0-9]+(?:-[a-z0-9]+){0,6}$/;
 
 export interface AgentFrontmatter {
   name?: string;
   description?: string;
-  model?: "opus" | "sonnet" | "haiku" | "inherit";
+  model?: ClaudeModelValue;
   tools?: string[];
   maxTurns?: number;
   disallowedTools?: string[];
   inject?: string[];
   mcp?: string[];
+  /**
+   * Provider-neutral routing discriminator (MAT #1534). The hand-rolled
+   * frontmatter YAML parser (./yaml.ts) has no nested-mapping support, so
+   * routing is expressed as flat sibling keys -- `provider`, `account`,
+   * `model` (reused), `effort` -- rather than a nested `routing:` block.
+   * Presence of `provider` is what switches an agent from legacy `model`
+   * semantics into routing semantics; see loadCustomAgents below.
+   */
+  provider?: string;
+  account?: string;
+  effort?: string;
   [key: string]: unknown;
 }
 
@@ -23,9 +48,19 @@ export interface AgentDefinition {
   description: string;
   prompt: string;
   tools?: string[];
-  model?: "opus" | "sonnet" | "haiku" | "inherit";
+  model?: ClaudeModelValue;
   maxTurns?: number;
   disallowedTools?: string[];
+  /**
+   * Provider-neutral routing (MAT #1534). Absent -- and only absent, never a
+   * default value -- means legacy behavior: this agent runs on the Claude
+   * Agent SDK Task/subagent path using `model` exactly as it always has.
+   * When present, it was validated by NativeAgentRoutingSchema; a native
+   * agent whose explicit routing config failed validation carries no
+   * `routing` field with a fallback value -- it is dropped from the agent
+   * map entirely by loadCustomAgents (see parseNativeAgentRouting).
+   */
+  routing?: NativeAgentRouting;
 }
 
 export function parseFrontmatter(content: string): ParsedAgent {
@@ -73,6 +108,30 @@ export function loadCustomAgents(
     const name = frontmatter.name ?? basename(file, ".md");
     if (!frontmatter.description) continue;
 
+    // Explicit routing config (a `provider:` frontmatter key present) must
+    // validate or the whole agent is dropped -- never silently downgraded
+    // to legacy Anthropic/inherit behavior. Only absence of `provider`
+    // means legacy semantics.
+    if (frontmatter.provider !== undefined) {
+      const routing = parseExplicitNativeAgentRouting(frontmatter);
+      if (routing === null) {
+        console.warn(`[kernel/agents] agent "${name}" has invalid routing configuration; excluding it from this session`);
+        continue;
+      }
+      const prompt = homePath ? resolveHomePaths(body, homePath) : body;
+      agents[name] = {
+        description: frontmatter.description,
+        prompt,
+        ...(frontmatter.tools && { tools: frontmatter.tools }),
+        ...(frontmatter.maxTurns && { maxTurns: frontmatter.maxTurns }),
+        ...(frontmatter.disallowedTools && {
+          disallowedTools: frontmatter.disallowedTools,
+        }),
+        routing,
+      };
+      continue;
+    }
+
     const prompt = homePath ? resolveHomePaths(body, homePath) : body;
 
     agents[name] = {
@@ -88,6 +147,27 @@ export function loadCustomAgents(
   }
 
   return agents;
+}
+
+/**
+ * Validates an agent's explicit routing frontmatter (`provider`, `account`,
+ * `model`, `effort`) against NativeAgentRoutingSchema. Returns null on any
+ * validation failure -- the caller must exclude the agent entirely rather
+ * than fall back to a default route. Only the fact that validation failed
+ * is logged (no raw Zod issues), per the "no raw error details in
+ * client-facing/log surfaces beyond a generic reason" convention used
+ * elsewhere for agent/provider configuration (see AgentConfigError in
+ * packages/gateway/src/agent-config/errors.ts).
+ */
+function parseExplicitNativeAgentRouting(frontmatter: AgentFrontmatter): NativeAgentRouting | null {
+  const candidate = {
+    provider: frontmatter.provider,
+    accountId: typeof frontmatter.account === "string" ? frontmatter.account : null,
+    model: typeof frontmatter.model === "string" ? frontmatter.model : null,
+    effort: typeof frontmatter.effort === "string" ? frontmatter.effort : null,
+  };
+  const parsed = NativeAgentRoutingSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
 }
 
 const IPC_TOOLS = {

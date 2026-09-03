@@ -41,6 +41,7 @@ export * from "#canonical-chat-provider";
 export * from "#canonical-chat-surface";
 export * from "#hermes-configuration";
 export * from "#kernel-result";
+export * from "#native-agent-routing";
 export * from "#kernel-conversations";
 export * from "#provider-settings";
 export * from "#funded-ai";

@@ -22,6 +22,7 @@
     "#contract-primitives": "./src/primitives.ts",
     "#hermes-configuration": "./src/hermes-configuration.ts",
     "#kernel-result": "./src/kernel-result.ts",
+    "#native-agent-routing": "./src/native-agent-routing.ts",
     "#legacy-contract-primitives": "./src/legacy-contract-primitives.ts",
     "#kernel-conversations": "./src/kernel-conversations.ts",
     "#provider-settings": "./src/provider-settings.ts",
