@@ -91,8 +91,15 @@ function railTransitionForActivity(activity: CanonicalChatRunActivity): {
 // approvalMessageId/approvalRequestDescription/approvalMessageParts below
 // produce that projection; see their single call site in appendRunActivities,
 // which mirrors the existing terminal.bound side effect in the same function.
-function approvalMessageId(kind: "request" | "result", approvalId: string): string {
-  const digest = createHash("sha256").update(approvalId).digest("hex").slice(0, 32);
+// Scoped by runId, not just approvalId: chat_messages.id is a global primary
+// key (not chat- or run-scoped — see database.ts), so a bare hash of
+// approvalId alone would let two different runs that happen to reuse the
+// same provider-supplied approvalId collide onto the same row, silently
+// dropping the second projection via the onConflict do-nothing below.
+// Matches the same scoping activityPersistenceId (orchestrator.ts) already
+// uses for run activities.
+function approvalMessageId(kind: "request" | "result", runId: string, approvalId: string): string {
+  const digest = createHash("sha256").update(`${runId}\0${approvalId}`).digest("hex").slice(0, 32);
   return `msg_approval_${kind}_${digest}`;
 }
 
@@ -117,7 +124,7 @@ function approvalMessageParts(activity: CanonicalChatRunActivity): {
 } | undefined {
   if (activity.type === "approval.requested") {
     return {
-      id: approvalMessageId("request", activity.approvalId),
+      id: approvalMessageId("request", activity.runId, activity.approvalId),
       parts: [CanonicalChatMessagePartSchema.parse({
         type: "approval_request",
         approvalId: activity.approvalId,
@@ -130,7 +137,7 @@ function approvalMessageParts(activity: CanonicalChatRunActivity): {
   }
   if (activity.type === "approval.resolved") {
     return {
-      id: approvalMessageId("result", activity.approvalId),
+      id: approvalMessageId("result", activity.runId, activity.approvalId),
       parts: [CanonicalChatMessagePartSchema.parse({
         type: "approval_result",
         approvalId: activity.approvalId,

@@ -939,7 +939,10 @@ async function applyControl(control) {
         approvalId: control.approvalId,
         decision: control.decision,
       });
-    } catch (_error) { stopping = true; }
+    } catch (error) {
+      process.stderr.write(`Failed to persist approval resolution for ${control.approvalId}: ${error?.message ?? error}\n`);
+      stopping = true;
+    }
   } else {
     const pending = pendingInputs.get(control.requestId);
     if (!pending) return { ok: false };
@@ -1015,7 +1018,10 @@ const cleanupTimer = setInterval(() => {
       // timed-out request needs this too, or its card stays "pending" in the
       // UI forever even though the agent has already moved on.
       void persist({ type: "matrix.codex.approval.resolved", approvalId, decision: "cancel" })
-        .catch(() => { stopping = true; });
+        .catch((error) => {
+          process.stderr.write(`Failed to persist timeout resolution for ${approvalId}: ${error?.message ?? error}\n`);
+          stopping = true;
+        });
     } catch (_error) { stopping = true; }
   }
   for (const [requestId, pending] of pendingInputs) {
