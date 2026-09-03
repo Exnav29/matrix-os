@@ -1,4 +1,5 @@
 import { kernelOptions, type KernelConfig } from "./options.js";
+import { createNativeAgentUsageCollector, foldNativeAgentUsage } from "./native-agent-executor/usage-collector.js";
 
 let _query: typeof import("@anthropic-ai/claude-agent-sdk").query | undefined;
 async function getQuery() {
@@ -137,7 +138,12 @@ export async function* spawnKernel(
       `.abort()` on the user's stop request. */
   abortController?: AbortController,
 ): AsyncGenerator<KernelEvent> {
-  const opts = await kernelOptions(config);
+  // Closure-scoped, per-spawnKernel()-call usage collector for
+  // OpenRouter-routed native-agent tool calls (MAT #1534 usage spike) --
+  // never a module-level singleton, never attached to globalThis, and
+  // never part of the object spread into the SDK's query() options below.
+  const nativeAgentUsageCollector = createNativeAgentUsageCollector();
+  const opts = await kernelOptions(config, { nativeAgentUsageCollector, abortController });
 
   // If resuming fails (stale session ID after container upgrade), retry without resume
   let retried = false;
@@ -208,7 +214,7 @@ export async function* spawnKernel(
       }
 
       if (msg.type === "result") {
-        const base = normalizeSdkResult(msg);
+        const base = foldNativeAgentUsage(normalizeSdkResult(msg), nativeAgentUsageCollector.snapshot());
 
         if (msg.subtype === "success") {
           yield { type: "result", data: { ...base, result: msg.result } };

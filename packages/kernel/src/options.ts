@@ -24,6 +24,9 @@ import {
   preCompactHook,
 } from "./hooks.js";
 import { createProtectedFilesHook } from "./evolution.js";
+import { splitAgentsByRouting, createNativeAgentToolServer } from "./native-agent-executor/registry.js";
+import { resolveNativeAgentCredentials } from "./native-agent-executor/credentials.js";
+import { createNativeAgentUsageCollector, type NativeAgentUsageCollector } from "./native-agent-executor/usage-collector.js";
 
 const IPC_TOOL_NAMES = [
   "mcp__matrix-os-ipc__list_tasks",
@@ -78,6 +81,23 @@ function loadBrowserConfig(homePath: string): {
     console.warn("[kernel-options] Could not load browser config:", err instanceof Error ? err.message : String(err));
     return null;
   }
+}
+
+/**
+ * Small, bounded addition to the system prompt (kernel prompt budget: keep
+ * under ~7K tokens per CLAUDE.md) telling the top-level model which agent
+ * names are routed through invoke_native_agent instead of Task. Returns ""
+ * when there are no openrouter-routed agents this session, so homes that
+ * never configure routing see zero prompt growth.
+ */
+function nativeAgentDirectory(toolAgents: Record<string, { description: string }>): string {
+  const names = Object.keys(toolAgents);
+  if (names.length === 0) return "";
+  const lines = names.map((name) => `- ${name}: ${toolAgents[name].description}`);
+  return "\n\n## Provider-neutral native agents\n"
+    + "These agents are routed to a non-Anthropic backend and run via the "
+    + "invoke_native_agent tool, not Task:\n"
+    + lines.join("\n");
 }
 
 const KERNEL_EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -230,8 +250,22 @@ export interface KernelConfig {
   env?: Record<string, string | undefined>;
 }
 
-export async function kernelOptions(config: KernelConfig) {
+/**
+ * Extra per-spawn wiring that is NOT part of the SDK's own options shape --
+ * kept as a separate parameter (rather than fields on the returned options
+ * object) so nothing Matrix-internal rides along on the object spread
+ * directly into the SDK's query() call. See native-agent-executor/
+ * usage-collector.ts for why the collector is closure-scoped per spawn.
+ */
+export interface KernelOptionsExtra {
+  nativeAgentUsageCollector?: NativeAgentUsageCollector;
+  abortController?: AbortController;
+}
+
+export async function kernelOptions(config: KernelConfig, extra: KernelOptionsExtra = {}) {
   const { db, homePath, sessionId } = config;
+  const nativeAgentUsageCollector = extra.nativeAgentUsageCollector ?? createNativeAgentUsageCollector();
+  const nativeAgentSignal = extra.abortController?.signal ?? new AbortController().signal;
 
   // Mirror canonical .agents/skills/ entries into .claude/skills/ so the SDK's
   // native Skill tool can discover them via settingSources: ['project'].
@@ -247,8 +281,12 @@ export async function kernelOptions(config: KernelConfig) {
   const ipcServer = await createIpcServer(db, homePath);
   const coreAgents = getCoreAgents(homePath);
   const customAgents = loadCustomAgents(`${homePath}/agents/custom`, homePath);
-  const agents = { ...coreAgents, ...customAgents };
-  const systemPrompt = buildSystemPrompt(homePath, db);
+  const mergedAgents = { ...coreAgents, ...customAgents };
+  // Provider-neutral per-agent routing (MAT #1534): openrouter-routed agents
+  // are pulled out of the SDK's own `agents` map entirely -- they can only
+  // be reached via the invoke_native_agent tool below, never via Task.
+  const { sdkAgents: agents, toolAgents } = splitAgentsByRouting(mergedAgents);
+  const systemPrompt = buildSystemPrompt(homePath, db) + nativeAgentDirectory(toolAgents);
   console.log("[kernel] System prompt length:", systemPrompt.length, "chars");
   console.log("[kernel] Contains app_data?", systemPrompt.includes("mcp__matrix-os-ipc__app_data"));
   const protectedFilesHook = createProtectedFilesHook(homePath);
@@ -256,6 +294,7 @@ export async function kernelOptions(config: KernelConfig) {
 
   const mcpServers: Record<string, unknown> = { "matrix-os-ipc": ipcServer };
   const browserToolNames: string[] = [];
+  const nativeAgentToolNames: string[] = [];
 
   const browserConfig = loadBrowserConfig(homePath);
   if (browserConfig) {
@@ -263,6 +302,23 @@ export async function kernelOptions(config: KernelConfig) {
     if (browserServer) {
       mcpServers["matrix-os-browser"] = browserServer;
       browserToolNames.push(...BROWSER_TOOL_NAMES);
+    }
+  }
+
+  if (Object.keys(toolAgents).length > 0) {
+    const nativeAgentCredentials = await resolveNativeAgentCredentials(
+      homePath,
+      Object.values(toolAgents).map((agent) => agent.accountId),
+    );
+    const nativeAgentServer = await createNativeAgentToolServer({
+      toolAgents,
+      credentials: nativeAgentCredentials,
+      usageCollector: nativeAgentUsageCollector,
+      signal: nativeAgentSignal,
+    });
+    if (nativeAgentServer) {
+      mcpServers["matrix-os-agents"] = nativeAgentServer;
+      nativeAgentToolNames.push("mcp__matrix-os-agents__invoke_native_agent");
     }
   }
 
@@ -287,6 +343,7 @@ export async function kernelOptions(config: KernelConfig) {
       "Task",
       "TaskOutput",
       "WebSearch",
+      ...nativeAgentToolNames,
       "WebFetch",
       ...IPC_TOOL_NAMES,
       ...browserToolNames,
