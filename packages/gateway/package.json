@@ -8,7 +8,8 @@
     "./app-publish": "./src/app-publish.ts",
     "./app-fork": "./src/app-fork.ts",
     "./app-manifest": "./src/app-manifest.ts",
-    "./sync/types": "./src/sync/types.ts"
+    "./sync/types": "./src/sync/types.ts",
+    "./agent-config/base-url-policy": "./src/agent-config/base-url-policy.ts"
   },
   "scripts": {
     "dev": "tsx watch src/main.ts",
