@@ -1,9 +1,11 @@
-import { useState } from "react";
-import { isSupportedGenericHarnessCredentialRoute, type ProviderAccessSource, type ProviderHarnessInstance, type ProviderSettingsSnapshot } from "@matrix-os/contracts";
+import { useEffect, useRef, useState } from "react";
+import { type ProviderAccessSource, type ProviderHarnessInstance, type ProviderSettingsSnapshot } from "@matrix-os/contracts";
+import { useLocalObservationExpiry } from "../local-observation-expiry.js";
 import type { ProviderSettingsMutationIntent } from "./types.js";
+import { ownAccountTargets, preferredOwnAccountTarget } from "./own-account-targets.js";
 
 /** Connection is a funding choice, never a synthetic model provider. */
-export function ConnectionChoices({ snapshot, harness, gatewaySource, gatewaySelected, onUseGateway, canSetRoute, disabled, onMutate, onSetupHarness }: {
+export function ConnectionChoices({ snapshot, harness, gatewaySource, gatewaySelected, onUseGateway, canSetRoute, disabled, onMutate, onSetupHarness, onRefreshForConnection }: {
   snapshot: ProviderSettingsSnapshot;
   harness: ProviderHarnessInstance;
   gatewaySource: ProviderAccessSource | null;
@@ -13,39 +15,78 @@ export function ConnectionChoices({ snapshot, harness, gatewaySource, gatewaySel
   disabled: boolean;
   onMutate: (intent: ProviderSettingsMutationIntent) => Promise<boolean> | void;
   onSetupHarness?: () => Promise<boolean>;
+  onRefreshForConnection?: () => Promise<ProviderSettingsSnapshot | null>;
 }) {
   const [pending, setPending] = useState(false);
   const [failed, setFailed] = useState(false);
+  const mounted = useRef(true);
+  const currentHarness = useRef(harness.id);
+  currentHarness.current = harness.id;
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useLocalObservationExpiry(snapshot.accessSources.map((source) => source.localObservation?.staleAfter));
   if ((harness.harness !== "pi" && harness.harness !== "opencode") || harness.installState !== "installed") return null;
-  const ownTargets = snapshot.accessSources.flatMap((source) => {
-    if (source.kind === "matrix_gateway") return [];
-    if (source.readiness.state !== "ready") return [];
-    const provider = snapshot.modelProviders.find((candidate) => candidate.id === source.providerId);
-    return provider?.models.filter((model) => model.enabled && source.eligibleModelIds.includes(model.id)
-      && isSupportedGenericHarnessCredentialRoute({ ...harness, accessSourceId: source.id,
-        route: { kind: "configurable", providerId: source.providerId, modelId: model.id } }, source))
-      .map((model) => ({ source, model })) ?? [];
-  });
-  const ownTarget = ownTargets.find(({ source, model }) => source.id === harness.accessSourceId && model.id === harness.route.modelId)
-    ?? ownTargets.find(({ model }) => model.id === harness.route.modelId) ?? ownTargets[0];
-  const ownSelected = !gatewaySelected && ownTargets.some(({ source }) => source.id === harness.accessSourceId);
+  const boundTargets = ownAccountTargets(snapshot, harness, false);
+  const legacyBindingUnknown = harness.configuredAccessSourceId === undefined && harness.accessSourceId === null;
+  const configuredSourceId = harness.configuredAccessSourceId ?? harness.accessSourceId;
+  // Own account is an explicit funding change when the saved choice is Matrix AI.
+  const savedSourceId = snapshot.accessSources.some((source) => source.id === configuredSourceId && source.kind === "matrix_gateway")
+    ? null : configuredSourceId;
+  const savedTarget = boundTargets.find(({ source, model }) => source.id === savedSourceId
+    && source.providerId === harness.route.providerId && model.id === harness.route.modelId);
+  const catalogRecovery = savedSourceId !== null && harness.configuredAccessSourceId === savedSourceId
+    && !savedTarget && harness.routeAvailability === "catalog_unavailable";
+  const freshTargets = ownAccountTargets(snapshot, harness);
+  const ownTarget = savedSourceId !== null
+    ? freshTargets.find(({ source, model }) => source.id === savedSourceId && model.id === harness.route.modelId)
+    : preferredOwnAccountTarget(freshTargets, harness);
+  const staleNative = savedTarget?.source.kind === "harness_profile" && savedTarget.source.readiness.state === "unknown"
+    && savedTarget.source.localObservation?.state === "present_unverified" ? savedTarget : undefined;
+  const ownSelected = !gatewaySelected && savedTarget !== undefined
+    && (savedTarget.source.kind === "harness_profile" ? savedTarget.source.accountId === null : savedTarget.source.accountId === harness.selectedAccountId);
   const usingGateway = gatewaySelected && harness.enabled;
   const needsUpdate = !harness.enabled && snapshot.atomicConnectSupported !== true;
   const selectOwn = async () => {
     setFailed(false);
     setPending(true);
     try {
-      const result = ownTarget && canSetRoute
+      if (legacyBindingUnknown) { setFailed(true); return; }
+      const freshAtClick = ownAccountTargets(snapshot, harness);
+      let target = savedSourceId !== null
+        ? freshAtClick.find(({ source, model }) => source.id === savedSourceId && model.id === harness.route.modelId)
+        : preferredOwnAccountTarget(freshAtClick, harness);
+      if (savedSourceId !== null && !savedTarget && !catalogRecovery) { setFailed(true); return; }
+      let current = snapshot;
+      if (!target && (staleNative || catalogRecovery) && canSetRoute && onRefreshForConnection) {
+        const refreshed = await onRefreshForConnection();
+        if (!mounted.current || currentHarness.current !== harness.id) return;
+        const refreshedHarness = refreshed?.harnesses.find((candidate) => candidate.id === harness.id && candidate.harness === harness.harness);
+        target = refreshed && refreshedHarness?.installState === "installed" && refreshed.access.mode === "writable"
+          && refreshed.supportedActions.includes("set_route")
+          && refreshedHarness.routeAvailability !== "catalog_unavailable"
+          && refreshedHarness.route.providerId === harness.route.providerId && refreshedHarness.route.modelId === harness.route.modelId
+          && refreshedHarness.selectedAccountId === harness.selectedAccountId
+          ? ownAccountTargets(refreshed, refreshedHarness).find(({ source, model }) => source.id === savedSourceId
+            && source.providerId === harness.route.providerId && model.id === harness.route.modelId
+            && source.kind === "harness_profile" && source.harness === harness.harness
+            && source.accountId === (staleNative ? staleNative.source.accountId : null)
+            && (refreshedHarness.configuredAccessSourceId ?? refreshedHarness.accessSourceId) === savedSourceId) : undefined;
+        if (!target || !refreshed || (!refreshedHarness?.enabled && refreshed.atomicConnectSupported !== true)) {
+          setFailed(true); return;
+        }
+        current = refreshed;
+      }
+      if (savedSourceId !== null && !target) { setFailed(true); return; }
+      const result = target && canSetRoute
         ? await onMutate({ type: "set_route", harnessInstanceId: harness.id,
-          route: { kind: "configurable", providerId: ownTarget.source.providerId, modelId: ownTarget.model.id },
-          accessSourceId: ownTarget.source.id, accountId: ownTarget.source.accountId,
-          ...(ownTarget.source.readiness.state === "ready" && snapshot.atomicConnectSupported === true ? { enableHarness: true } : {}) })
+          route: { kind: "configurable", providerId: target.source.providerId, modelId: target.model.id },
+          accessSourceId: target.source.id, accountId: target.source.accountId,
+          ...(current.atomicConnectSupported === true ? { enableHarness: true } : {}) })
         : await onSetupHarness?.();
-      if (result === false) setFailed(true);
+      if (result === false && mounted.current && currentHarness.current === harness.id) setFailed(true);
     } catch (error) {
       console.warn("[provider-settings] Connection action failed:", error instanceof Error ? error.name : typeof error);
-      setFailed(true);
-    } finally { setPending(false); }
+      if (mounted.current && currentHarness.current === harness.id) setFailed(true);
+    } finally { if (mounted.current) setPending(false); }
   };
   return <div className="matrix-ap-connection" role="group" aria-label={`${harness.displayName} connection`}>
     <div className="matrix-ap-connection-options">
@@ -55,10 +96,11 @@ export function ConnectionChoices({ snapshot, harness, gatewaySource, gatewaySel
         <span>{gatewaySelected ? "Matrix credit · no separate login" : gatewaySource?.readiness.state === "ready" && onUseGateway ? "Matrix credit · no separate login" : "Not available for this connection"}</span>
       </button>
       <button type="button" className="matrix-ap-connection-choice" aria-pressed={ownSelected}
-        disabled={disabled || pending || needsUpdate || !(ownTarget && canSetRoute) && !onSetupHarness} onClick={() => { void selectOwn(); }}>
+        disabled={disabled || pending || needsUpdate || !(ownTarget && canSetRoute) && !(staleNative && canSetRoute && onRefreshForConnection) && !(savedSourceId !== null && canSetRoute) && !onSetupHarness} onClick={() => { void selectOwn(); }}>
         <strong>Own account</strong><span>{ownSelected ? "Selected" : `Connect through ${harness.displayName}`}</span>
       </button>
     </div>
+    {catalogRecovery ? <p className="matrix-ap-help" role="status">Saved connection unavailable. Try Own account to refresh this connection.</p> : null}
     {needsUpdate ? <p className="matrix-ap-help" role="status">Update this computer to connect and enable an agent in one step.</p> : null}
     {failed ? <p role="alert" className="matrix-ap-help">Connection could not be updated. Try again.</p> : null}
   </div>;
