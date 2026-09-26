@@ -68,6 +68,19 @@ describe("shared terminal grid presentation", () => {
     expect(geometry.visualHeight()).toBeLessThanOrEqual(600.5);
   });
 
+  it.each(["", "auto"])("owns outer scroll anchoring while presented and restores '%s' on teardown", (anchor) => {
+    const { host, presentation, layout } = setup();
+    host.style.overflowAnchor = anchor;
+    layout(1_600, 300);
+    expect(host.style.overflowAnchor).toBe("none");
+    presentation.reset();
+    expect(host.style.overflowAnchor).toBe(anchor);
+    layout(1_600, 300);
+    expect(host.style.overflowAnchor).toBe("none");
+    presentation.dispose();
+    expect(host.style.overflowAnchor).toBe(anchor);
+  });
+
   it("keeps deliberate outer-grid panning through repeated resizes", () => {
     const { host, layout } = setup();
     layout(1_600, 300);
@@ -313,6 +326,22 @@ describe("shared terminal grid presentation", () => {
     expect(host.scrollTop).toBeCloseTo(bottom);
   });
 
+  it("resumes bottom follow when a resize precedes the queued scroll layout", () => {
+    const { host, root, geometry, layout } = setup();
+    layout(1_600, 500);
+    Object.defineProperty(host, "scrollHeight", { get: () => Number.parseFloat(root.parentElement!.style.height) });
+    const oldBottom = host.scrollHeight - host.clientHeight;
+    expect(oldBottom).toBeGreaterThan(0);
+    root.addEventListener("wheel", (event) => event.preventDefault());
+    root.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -2_000 }));
+    expect(host.scrollTop).toBe(0);
+    // The browser reports scroll asynchronously. Return to the old bottom and
+    // shrink before the scheduled presentation frame has acknowledged it.
+    host.scrollTop = oldBottom;
+    layout(1_600, 300);
+    expect(geometry.visualHeight() - host.scrollTop).toBeLessThanOrEqual(host.clientHeight + 0.5);
+  });
+
   it("does not pull a deliberate bottom pan back to a prompt near the top", () => {
     const { host, root, terminal, layout, presentation } = setup();
     Object.defineProperty(terminal, "buffer", { value: { active: { baseY: 0, viewportY: 0, cursorY: 0, cursorX: 0 } } });
@@ -325,6 +354,52 @@ describe("shared terminal grid presentation", () => {
     presentation.schedule();
     flush();
     expect(host.scrollTop).toBe(bottom);
+  });
+
+  it("preserves a wheel pan above the old bottom when the viewport shrinks", () => {
+    const { host, root, layout } = setup();
+    layout(1_600, 500);
+    Object.defineProperty(host, "scrollHeight", { get: () => Number.parseFloat(root.parentElement!.style.height) });
+    const oldBottom = host.scrollHeight - host.clientHeight;
+    root.addEventListener("wheel", (event) => event.preventDefault());
+    root.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -20 }));
+    expect(host.scrollTop).toBeCloseTo(oldBottom - 20);
+    layout(1_600, 300);
+    expect(host.scrollTop).toBeCloseTo(oldBottom - 20);
+  });
+
+  it("preserves a deliberate downward wheel after shrink before queued layout", () => {
+    const { host, root, geometry, layout, presentation } = setup();
+    layout(1_600, 500);
+    Object.defineProperty(host, "scrollHeight", { get: () => Number.parseFloat(root.parentElement!.style.height) });
+    const oldBottom = host.scrollTop;
+    geometry.setHostSize(1_600, 300);
+    root.addEventListener("wheel", (event) => event.preventDefault());
+    root.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 20 }));
+    const chosenPan = host.scrollTop;
+    expect(chosenPan).toBeGreaterThan(oldBottom);
+    expect(chosenPan).toBeLessThan(host.scrollHeight - host.clientHeight);
+    presentation.schedule();
+    flush();
+    expect(host.scrollTop).toBe(chosenPan);
+  });
+
+  it.each(["font", "grid", "content", "scrollback"])("does not resume from the old bottom after a %s change", (change) => {
+    const { host, root, terminal, layout } = setup();
+    layout(1_600, 500);
+    Object.defineProperty(host, "scrollHeight", { get: () => Number.parseFloat(root.parentElement!.style.height) });
+    const oldBottom = host.scrollHeight - host.clientHeight;
+    root.addEventListener("wheel", (event) => event.preventDefault());
+    root.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -2_000 }));
+    host.scrollTop = oldBottom;
+    if (change === "font") terminal.options.fontSize = 12;
+    if (change === "grid") terminal.resize(120, 40);
+    if (change === "content") Object.defineProperty(terminal, "buffer", { configurable: true,
+      value: { active: { baseY: 0, viewportY: 0, cursorY: 35, cursorX: 2, getLine: () => undefined } } });
+    if (change === "scrollback") Object.defineProperty(terminal, "buffer", { configurable: true,
+      value: { active: { baseY: 0, viewportY: -1, cursorY: 35, cursorX: 2 } } });
+    layout(1_600, 300);
+    expect(host.scrollTop).toBe(oldBottom);
   });
 
   it.each(["ctrlKey", "metaKey", "altKey", "shiftKey"])("preserves modified wheel gestures with %s", (modifier) => {
