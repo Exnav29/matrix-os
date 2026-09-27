@@ -301,7 +301,7 @@ describe("AgentsProvidersView", () => {
     expect(screen.getAllByText(/Local login found; access not verified/)).toHaveLength(2);
     expect(screen.queryByText("Authenticated · Oauth")).not.toBeInTheDocument();
     act(() => vi.advanceTimersByTime(5_001));
-    expect(screen.getAllByText(/Access not verified/)).toHaveLength(2);
+    expect(screen.getAllByText(/Local login last found; access not verified/)).toHaveLength(2);
     expect(screen.queryByText(/Local login found; access not verified/)).not.toBeInTheDocument();
     next.harnesses[0]!.enabled = false;
     next.harnesses[0]!.configuredEnabled = false;
@@ -324,9 +324,9 @@ describe("AgentsProvidersView", () => {
     expect(screen.getAllByText("Local login found; access not verified")).toHaveLength(2);
     act(() => vi.advanceTimersByTime(5001));
     expect(screen.queryByText("Local login found; access not verified")).not.toBeInTheDocument();
-    expect(screen.getAllByText("Access not verified")).toHaveLength(2);
+    expect(screen.getAllByText("Local login last found; access not verified")).toHaveLength(2);
   });
-  it("shows saved enabled intent separately from a failed connection and permits disabling it", () => {
+  it("shows saved enabled intent separately from unavailable access and permits disabling it", () => {
     const next = snapshot();
     const harness = next.harnesses[0]!;
     Object.assign(harness, {

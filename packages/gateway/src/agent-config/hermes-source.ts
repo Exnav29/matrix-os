@@ -42,7 +42,7 @@ const HermesProviderSchema = z.object({
   slug: z.unknown(),
   name: z.unknown().optional(),
   authenticated: z.boolean().optional(),
-  auth_type: z.string().max(64).optional(),
+  auth_type: z.string().max(64).nullable().optional(),
   is_user_defined: z.boolean().optional(),
   models: z.array(z.unknown()).max(512).optional(),
 }).passthrough();
@@ -96,7 +96,7 @@ function normalizeProvider(
   const name = DisplayNameSchema.safeParse(parsed.data.name);
   const authenticated = parsed.data.authenticated === true;
   const authKind = authKindForProvider(
-    parsed.data.auth_type,
+    parsed.data.auth_type ?? undefined,
     parsed.data.is_user_defined === true,
   );
   const models = parseModelIds(
@@ -132,6 +132,7 @@ function normalizeProvider(
 export function normalizeHermesRuntimeSnapshot(input: {
   status: unknown;
   options: unknown;
+  observedAt?: number;
 }): AgentRuntimeSettingsSnapshot {
   const status = HermesStatusSchema.parse(input.status);
   const options = HermesOptionsSchema.parse(input.options);
@@ -186,6 +187,18 @@ export function normalizeHermesRuntimeSnapshot(input: {
     && selectedProvider?.models.some((model) => model.id === currentModel) === true;
   const configured = currentProvider !== null && currentModel !== null && hasSelection;
   const version = VersionSchema.safeParse(status.version);
+  // Legacy authKind defaults to OAuth for display compatibility. Exact source
+  // evidence requires a unique raw provider with an explicit credential origin.
+  const selectedNativeRecords = options.providers.filter((raw) =>
+    typeof raw === "object" && raw !== null && "slug" in raw
+      && typeof raw.slug === "string" && raw.slug.trim() === currentProvider);
+  const nativeParsed = selectedNativeRecords.length === 1
+    ? HermesProviderSchema.safeParse(selectedNativeRecords[0]) : undefined;
+  const nativeProvider = nativeParsed?.success ? nativeParsed.data : undefined;
+  const nativeCredentialKind = nativeProvider?.is_user_defined === true ? "custom" as const
+    : nativeProvider?.auth_type === "oauth" ? "provider_profile" as const
+    : nativeProvider?.auth_type === "api_key" ? "api_key" as const
+      : nativeProvider?.auth_type === "base_url" || nativeProvider?.auth_type === "custom" ? "custom" as const : undefined;
 
   return {
     runtime: {
@@ -198,6 +211,18 @@ export function normalizeHermesRuntimeSnapshot(input: {
           health: status.gateway_running === true ? "healthy" : "degraded",
           selectionState: "active",
           configured,
+          ...(configured && selectedProvider && nativeCredentialKind && input.observedAt !== undefined ? {
+            nativeRouteObservation: {
+              providerId: currentProvider!, modelId: currentModel!,
+              credentialKind: nativeCredentialKind,
+              localObservation: {
+                state: nativeProvider?.authenticated === true ? "present_unverified" as const
+                  : nativeProvider?.authenticated === false ? "absent" as const : "unknown" as const,
+                checkedAt: new Date(input.observedAt).toISOString(),
+                staleAfter: new Date(input.observedAt + 5_000).toISOString(),
+              },
+            },
+          } : {}),
           ...(version.success ? { version: version.data } : {}),
           capabilities: [
             "provider_catalog",
@@ -257,6 +282,7 @@ export function createHermesRuntimeSource(
     if (cached !== null && cached.expiresAt > now()) return cached.value;
     if (inFlight === null || inFlight.generation !== generation) {
       const requestGeneration = generation;
+      const observedAt = now();
       const promise = Promise.allSettled([
         readJson("/api/status", signal),
         readJson("/api/model/options", signal),
@@ -276,6 +302,7 @@ export function createHermesRuntimeSource(
         return normalizeHermesRuntimeSnapshot({
           status: statusResult.value,
           options: modelOptions,
+          observedAt,
         });
       }).catch((err: unknown) => {
         logWarning(err instanceof Error ? err.name : "UnknownError");
