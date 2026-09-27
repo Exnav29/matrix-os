@@ -17,9 +17,9 @@ describe("native terminal history", () => {
     const root = document.createElement("div");
     parent.append(host); host.append(root); document.body.append(parent);
     Object.defineProperties(host, { clientHeight: { value: 360, configurable: true }, clientWidth: { value: 800 }, scrollHeight: { value: 360 } });
-    const scrollToLine = vi.fn(); const scrollNative = vi.fn();
+    const scrollToLine = vi.fn(); const scrollNative = vi.fn(); const onPan = vi.fn();
     let state = { above: 20, below: 80, rows: 36 };
-    const bar = createTerminalScrollbar({ host, root, getCellHeight: () => 10, onPan() {},
+    const bar = createTerminalScrollbar({ host, root, getCellHeight: () => 10, onPan,
       terminal: { buffer: { active: { baseY: 0, viewportY: 0 } }, scrollToLine, onScroll: () => ({ dispose() {} }) },
       nativeHistory: { getState: () => state, scrollTo: scrollNative },
     });
@@ -31,6 +31,7 @@ describe("native terminal history", () => {
       expect(rail.scrollTop).toBe(200);
       rail.scrollTop = 750; rail.dispatchEvent(new Event("scroll"));
       expect(scrollNative).toHaveBeenCalledWith(75);
+      expect(onPan).toHaveBeenLastCalledWith(false);
       expect(scrollToLine).not.toHaveBeenCalled();
       state = { above: 75, below: 40, rows: 36 }; bar.sync();
       expect(rail.firstElementChild?.getAttribute("style")).toContain("1510px");
@@ -39,6 +40,10 @@ describe("native terminal history", () => {
       bar.sync();
       expect(rail.firstElementChild?.getAttribute("style")).toContain("3020px");
       expect(rail.scrollTop).toBe(1500);
+      rail.scrollTop = 2300; rail.dispatchEvent(new Event("scroll"));
+      expect(scrollNative).toHaveBeenLastCalledWith(115);
+      expect(onPan).toHaveBeenLastCalledWith(true);
+      expect(scrollToLine).not.toHaveBeenCalled();
     } finally { bar.dispose(); parent.remove(); }
   });
 });
@@ -86,4 +91,18 @@ it("recovers after an unavailable native query and clears state across reattachm
     history.update({ above: 50, below: 0, rows: 36 });
     expect(history.getState()?.above).toBe(50);
   } finally { history.dispose(); vi.useRealTimers(); }
+});
+
+it.each(["unsupported", "disposed"])("rejects a scroll target when native history is %s", async lifecycle => {
+  const { createTerminalNativeHistory } = await import("../../packages/ui/src/terminal/terminal-native-history");
+  const send = vi.fn();
+  const history = createTerminalNativeHistory({ send, canWrite: () => true, onState() {} });
+  try {
+    if (lifecycle === "disposed") history.attach(true);
+    history.update({ above: 50, below: 0, rows: 36 });
+    if (lifecycle === "disposed") history.dispose();
+    send.mockClear();
+    expect(history.scrollTo(20)).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  } finally { history.dispose(); }
 });

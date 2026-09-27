@@ -224,6 +224,63 @@ describe("real terminal renderer soft-grid resizing", () => {
     } finally { if (!electron) await page.close(); }
   });
 
+  it.each(nativeElectron ? ["electron"] : ["web-mobile", "web"])("preserves a history rail gesture before queued presentation expands the grid in %s", async surface => {
+    const mobile = surface === "web-mobile";
+    const page = electron ? await electron.firstWindow() : await browser.newPage({ viewport: { width: mobile ? 430 : 1450, height: 1050 }, isMobile: mobile, hasTouch: mobile });
+    try {
+      await page.goto(`${origin}/?surface=${surface}`);
+      await page.locator("[data-terminal-grid-stage]").waitFor();
+      await page.locator("#terminal-window").evaluate(element => { (element as HTMLElement).style.height = "300px"; });
+      await page.evaluate(() => (window as unknown as { fixtureOutput(data: string): void }).fixtureOutput("\x1bcshort\r\nresult\r\n$ "));
+      await expect.poll(async () => page.locator("[data-terminal-viewport]").evaluate(host => host.scrollHeight - host.clientHeight)).toBe(0);
+      await page.evaluate(() => {
+        const original = window.requestAnimationFrame.bind(window);
+        const queued: FrameRequestCallback[] = [];
+        window.requestAnimationFrame = callback => {
+          if (queued.length >= 128) throw new Error("Diagnostic frame limit exceeded");
+          queued.push(callback); return -queued.length;
+        };
+        (window as unknown as { releaseHistoryFrames(): void }).releaseHistoryFrames = () => {
+          window.requestAnimationFrame = original;
+          queued.splice(0).forEach(callback => original(callback));
+        };
+        (window as unknown as { fixtureOutput(data: string): void }).fixtureOutput("\x1bc" + Array.from({ length: 80 }, (_, i) => `HISTORY_${i}\r\n`).join(""));
+      });
+      const rail = page.locator('[data-terminal-scrollbar="content"]');
+      await expect.poll(() => rail.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+      await rail.evaluate(element => {
+        element.addEventListener("scroll", () => { document.documentElement.dataset.historyRailGesture = "true"; }, { once: true });
+        element.scrollTop = 0;
+      });
+      // Deliver the original native rail event before releasing the queued
+      // presentation and xterm smooth-scroll frames, as a loaded host can do.
+      await page.waitForFunction(() => document.documentElement.dataset.historyRailGesture === "true");
+      await page.evaluate(() => (window as unknown as { releaseHistoryFrames(): void }).releaseHistoryFrames());
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      await expect.poll(async () => ({ pan: (await geometry(page)).panTop, history: await rail.evaluate(element => element.scrollTop) }), { timeout: 5_000 }).toEqual({ pan: 0, history: 0 });
+      await page.evaluate(() => (window as unknown as { fixtureOutput(data: string): void }).fixtureOutput("\r\nOUTPUT_WHILE_READING"));
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      expect((await geometry(page)).panTop).toBe(0);
+      for (const method of mobile ? ["rail", "wheel"] : ["rail", "wheel", "keyboard"]) {
+        await rail.evaluate(element => { element.scrollTop = 0; });
+        await expect.poll(() => rail.evaluate(element => element.scrollTop)).toBe(0);
+        if (method === "rail") await rail.evaluate(element => { element.scrollTop = element.scrollHeight; });
+        else if (method === "wheel") {
+          const box = await rail.boundingBox();
+          if (!box) throw new Error("History rail is not measurable");
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+          await page.mouse.wheel(0, 2_000);
+        } else {
+          await rail.focus();
+          await page.keyboard.press("End");
+        }
+        await expect.poll(() => rail.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop), { timeout: 5_000 }).toBeLessThanOrEqual(1);
+        await page.locator("#terminal-window").evaluate(element => { (element as HTMLElement).style.height = "250px"; });
+        await expect.poll(async () => { const g = await geometry(page); return g.bottom - g.visibleBottom; }, { timeout: 5_000 }).toBeLessThanOrEqual(1);
+      }
+    } finally { if (!electron) await page.close(); }
+  });
+
   it.each([
     { surface: "web", name: "Web Desktop", zoom: 1 }, { surface: "web", name: "Web Canvas", zoom: 0.75 },
     { surface: "electron", name: "Electron Desktop", zoom: 1 },
