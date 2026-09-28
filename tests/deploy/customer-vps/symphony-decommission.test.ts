@@ -85,6 +85,233 @@ describe("retiring the legacy Symphony runtime", () => {
     }
   });
 
+  it("retires a live legacy unit after an older updater cleared its transaction", () => {
+    const base = mkdtempSync(join(tmpdir(), "symphony-first-upgrade-"));
+    try {
+      const liveUnit = join(base, "matrix-symphony.service");
+      const backup = join(base, "backup");
+      writeFileSync(liveUnit, "[Service]\nExecStart=/opt/matrix/bin/matrix-symphony\n");
+      const helper = (name: string) => syncAgent.match(new RegExp(`${name}\\(\\) \\{\\n[\\s\\S]*?\\n\\}`))?.[0]
+        .replaceAll("/etc/systemd/system/matrix-symphony.service", '"$LIVE_UNIT_PATH"');
+      const persist = helper("persist_legacy_symphony_rollback");
+      const retire = helper("retire_legacy_symphony");
+      expect(persist && retire).toBeTruthy();
+      execFileSync("bash", ["-c", `set -e
+${persist}
+${retire}
+UPDATE_TRANSACTION_DIR="$1"
+RETIRED_SYMPHONY_ROLLBACK_DIR="$2"
+LIVE_UNIT_PATH="$3"
+active=true
+log() { :; }
+sudo() {
+  if [ "$1" = systemctl ]; then
+    case "$2" in
+      cat|daemon-reload) return 0;;
+      is-enabled) printf 'enabled\\n';;
+      is-active) if [ "$3" = --quiet ]; then [ "$active" = true ]; else printf '%s\\n' "$([ "$active" = true ] && echo active || echo inactive)"; fi;;
+      disable) active=false;;
+      *) return 1;;
+    esac
+  elif [ "$1" = tee ]; then
+    shift
+    tee "$@"
+  elif [ "$1" = install ]; then
+    shift
+    local args=()
+    while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2;; *) args+=("$1"); shift;; esac; done
+    install "${'${args[@]}'}"
+  else
+    "$@"
+  fi
+}
+retire_legacy_symphony`, "test", join(base, "cleared-transaction"), backup, liveUnit], { encoding: "utf8" });
+      expect(existsSync(liveUnit)).toBe(false);
+      expect(readFileSync(join(backup, "unit"), "utf8")).toContain("ExecStart=/opt/matrix/bin/matrix-symphony");
+      expect(readFileSync(join(backup, "enablement"), "utf8")).toBe("matrix-symphony.service:enabled\n");
+      expect(readFileSync(join(backup, "activity"), "utf8")).toBe("matrix-symphony.service:active\n");
+      const app = join(base, "app");
+      const systemctlLog = join(base, "systemctl.log");
+      mkdirSync(join(app, "packages/symphony-elixir/release/bin"), { recursive: true });
+      writeFileSync(join(app, "packages/symphony-elixir/release/bin/symphony"), "#!/bin/sh\n", { mode: 0o755 });
+      const restore = recovery.match(/restore_retired_symphony_after_rollback\(\) \{\n[\s\S]*?\n\}/)?.[0]
+        .replaceAll("/etc/systemd/system/matrix-symphony.service", '"$LIVE_UNIT_PATH"');
+      expect(restore).toBeDefined();
+      execFileSync("bash", ["-c", `set -e\n${restore}\nAPP_DIR="$1"\nRETIRED_SYMPHONY_ROLLBACK_DIR="$2"\nLIVE_UNIT_PATH="$3"\nSYSTEMCTL_LOG="$4"\nrestore_regular_file_atomic() { cp "$1" "$LIVE_UNIT_PATH"; }\nsudo() { if [ "$1" = systemctl ]; then shift; printf 'systemctl %s\\n' "$*" >>"$SYSTEMCTL_LOG"; else "$@"; fi; }\nrestore_retired_symphony_after_rollback`, "test", app, backup, liveUnit, systemctlLog]);
+      expect(readFileSync(liveUnit, "utf8")).toContain("ExecStart=/opt/matrix/bin/matrix-symphony");
+      expect(readFileSync(systemctlLog, "utf8")).toContain("systemctl enable matrix-symphony.service");
+      expect(readFileSync(systemctlLog, "utf8")).toContain("systemctl start matrix-symphony.service");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("retires a masked unit after an older updater cleared its transaction", () => {
+    const base = mkdtempSync(join(tmpdir(), "symphony-masked-first-upgrade-"));
+    try {
+      const liveUnit = join(base, "matrix-symphony.service");
+      const backup = join(base, "backup");
+      symlinkSync("/dev/null", liveUnit);
+      const helper = (name: string) => syncAgent.match(new RegExp(`${name}\\(\\) \\{\\n[\\s\\S]*?\\n\\}`))?.[0]
+        .replaceAll("/etc/systemd/system/matrix-symphony.service", '"$LIVE_UNIT_PATH"');
+      const persist = helper("persist_legacy_symphony_rollback");
+      const retire = helper("retire_legacy_symphony");
+      expect(persist && retire).toBeTruthy();
+      execFileSync("bash", ["-c", `set -e
+${persist}
+${retire}
+UPDATE_TRANSACTION_DIR="$1"
+RETIRED_SYMPHONY_ROLLBACK_DIR="$2"
+LIVE_UNIT_PATH="$3"
+log() { :; }
+sudo() {
+  if [ "$1" = systemctl ]; then
+    case "$2" in
+      is-enabled) printf 'masked\\n';;
+      is-active) if [ "$3" = --quiet ]; then return 1; fi; printf 'inactive\\n';;
+      daemon-reload) return 0;;
+      *) return 1;;
+    esac
+  elif [ "$1" = install ]; then
+    shift
+    local args=()
+    while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2;; *) args+=("$1"); shift;; esac; done
+    install "${'${args[@]}'}"
+  elif [ "$1" = tee ]; then
+    shift
+    tee "$@"
+  else
+    "$@"
+  fi
+}
+retire_legacy_symphony`, "test", join(base, "cleared-transaction"), backup, liveUnit], { encoding: "utf8" });
+      expect(existsSync(liveUnit)).toBe(false);
+      expect(existsSync(join(backup, "masked"))).toBe(true);
+      expect(readFileSync(join(backup, "enablement"), "utf8")).toBe("matrix-symphony.service:masked\n");
+      const app = join(base, "app");
+      const systemctlLog = join(base, "systemctl.log");
+      mkdirSync(join(app, "packages/symphony-elixir/release/bin"), { recursive: true });
+      writeFileSync(join(app, "packages/symphony-elixir/release/bin/symphony"), "#!/bin/sh\n", { mode: 0o755 });
+      const restore = recovery.match(/restore_retired_symphony_after_rollback\(\) \{\n[\s\S]*?\n\}/)?.[0]
+        .replaceAll("/etc/systemd/system/matrix-symphony.service", '"$LIVE_UNIT_PATH"');
+      expect(restore).toBeDefined();
+      execFileSync("bash", ["-c", `set -e\n${restore}\nAPP_DIR="$1"\nRETIRED_SYMPHONY_ROLLBACK_DIR="$2"\nLIVE_UNIT_PATH="$3"\nSYSTEMCTL_LOG="$4"\nrestore_regular_file_atomic() { return 1; }\nsudo() { if [ "$1" = systemctl ]; then shift; printf 'systemctl %s\\n' "$*" >>"$SYSTEMCTL_LOG"; case "$1" in mask) ln -s /dev/null "$LIVE_UNIT_PATH";; esac; else "$@"; fi; }\nrestore_retired_symphony_after_rollback`, "test", app, backup, liveUnit, systemctlLog]);
+      expect(readlinkSync(liveUnit)).toBe("/dev/null");
+      expect(readFileSync(systemctlLog, "utf8")).toContain("systemctl mask matrix-symphony.service");
+      expect(readFileSync(systemctlLog, "utf8")).toContain("systemctl stop matrix-symphony.service");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the original rollback state when retirement retries after disabling the unit", () => {
+    const base = mkdtempSync(join(tmpdir(), "symphony-retirement-retry-"));
+    try {
+      const liveUnit = join(base, "matrix-symphony.service");
+      const backup = join(base, "backup");
+      mkdirSync(backup);
+      writeFileSync(liveUnit, "[Service]\nExecStart=/opt/matrix/bin/matrix-symphony\n");
+      writeFileSync(join(backup, "unit"), readFileSync(liveUnit));
+      writeFileSync(join(backup, "enablement"), "matrix-symphony.service:enabled\n");
+      writeFileSync(join(backup, "activity"), "matrix-symphony.service:active\n");
+      const persist = syncAgent.match(/persist_legacy_symphony_rollback\(\) \{\n[\s\S]*?\n\}/)?.[0]
+        .replaceAll("/etc/systemd/system/matrix-symphony.service", '"$LIVE_UNIT_PATH"');
+      expect(persist).toBeDefined();
+      execFileSync("bash", ["-c", `set -e
+${persist}
+UPDATE_TRANSACTION_DIR="$1"
+RETIRED_SYMPHONY_ROLLBACK_DIR="$2"
+LIVE_UNIT_PATH="$3"
+log() { :; }
+sudo() {
+  if [ "$1" = systemctl ]; then
+    case "$2" in
+      is-enabled) printf 'disabled\\n';;
+      is-active) printf 'inactive\\n';;
+      *) return 1;;
+    esac
+  elif [ "$1" = install ]; then
+    shift
+    local args=()
+    while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2;; *) args+=("$1"); shift;; esac; done
+    install "${'${args[@]}'}"
+  elif [ "$1" = tee ]; then
+    shift
+    tee "$@"
+  else
+    "$@"
+  fi
+}
+persist_legacy_symphony_rollback`, "test", join(base, "cleared-transaction"), backup, liveUnit], { encoding: "utf8" });
+      expect(readFileSync(join(backup, "enablement"), "utf8")).toBe("matrix-symphony.service:enabled\n");
+      expect(readFileSync(join(backup, "activity"), "utf8")).toBe("matrix-symphony.service:active\n");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replace an incomplete prior rollback snapshot with stopped service state", () => {
+    const base = mkdtempSync(join(tmpdir(), "symphony-invalid-backup-"));
+    try {
+      const liveUnit = join(base, "matrix-symphony.service");
+      const backup = join(base, "backup");
+      mkdirSync(backup);
+      writeFileSync(liveUnit, "[Service]\nExecStart=/opt/matrix/bin/matrix-symphony\n");
+      writeFileSync(join(backup, "unit"), readFileSync(liveUnit));
+      writeFileSync(join(backup, "enablement"), "matrix-symphony.service:enabled\n");
+      const persist = syncAgent.match(/persist_legacy_symphony_rollback\(\) \{\n[\s\S]*?\n\}/)?.[0]
+        .replaceAll("/etc/systemd/system/matrix-symphony.service", '"$LIVE_UNIT_PATH"');
+      expect(persist).toBeDefined();
+      const command = `set -e
+${persist}
+UPDATE_TRANSACTION_DIR="$1"
+RETIRED_SYMPHONY_ROLLBACK_DIR="$2"
+LIVE_UNIT_PATH="$3"
+log() { :; }
+sudo() {
+  if [ "$1" = systemctl ]; then
+    case "$2" in is-enabled) printf 'disabled\\n';; is-active) printf 'inactive\\n';; esac
+  elif [ "$1" = install ]; then
+    shift
+    local args=()
+    while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2;; *) args+=("$1"); shift;; esac; done
+    install "${'${args[@]}'}"
+  elif [ "$1" = tee ]; then shift; tee "$@"
+  else "$@"; fi
+}
+persist_legacy_symphony_rollback`;
+      expect(() => execFileSync("bash", ["-c", command, "test", join(base, "cleared-transaction"), backup, liveUnit])).toThrow();
+      expect(readFileSync(join(backup, "enablement"), "utf8")).toBe("matrix-symphony.service:enabled\n");
+      expect(existsSync(join(backup, "activity"))).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("clears the durable snapshot only after a healthy rollback restores the old runtime", () => {
+    const base = mkdtempSync(join(tmpdir(), "symphony-rollback-cleanup-"));
+    try {
+      const app = join(base, "app");
+      const backup = join(base, "backup");
+      const oldBinary = join(app, "packages/symphony-elixir/release/bin/symphony");
+      mkdirSync(join(app, "packages/symphony-elixir/release/bin"), { recursive: true });
+      mkdirSync(backup);
+      writeFileSync(oldBinary, "#!/bin/sh\n", { mode: 0o755 });
+      const clear = recovery.match(/clear_retired_symphony_rollback_after_rollback\(\) \{\n[\s\S]*?\n\}/)?.[0];
+      expect(clear).toBeDefined();
+      expect(recovery).toContain("clear_retired_symphony_rollback_after_rollback || return 1");
+      const command = `set -e\n${clear}\nAPP_DIR="$1"\nRETIRED_SYMPHONY_ROLLBACK_DIR="$2"\nsudo() { "$@"; }\nclear_retired_symphony_rollback_after_rollback`;
+      execFileSync("bash", ["-c", command, "test", app, backup]);
+      expect(existsSync(backup)).toBe(false);
+      mkdirSync(backup);
+      rmSync(oldBinary);
+      execFileSync("bash", ["-c", command, "test", app, backup]);
+      expect(existsSync(backup)).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it("retires a masked legacy unit and restores the mask on rollback", () => {
     const base = mkdtempSync(join(tmpdir(), "symphony-masked-"));
     try {

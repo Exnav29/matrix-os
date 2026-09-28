@@ -63,28 +63,88 @@ resume_symphony_after_update() {
 persist_legacy_symphony_rollback() {
   local source="$UPDATE_TRANSACTION_DIR/systemd/matrix-symphony.service"
   local masked="$UPDATE_TRANSACTION_DIR/symphony.masked"
+  local installed_unit=/etc/systemd/system/matrix-symphony.service
   local incoming="${RETIRED_SYMPHONY_ROLLBACK_DIR}.incoming.$$"
-  if { [ ! -f "$source" ] || [ -L "$source" ]; } &&
-    { [ ! -f "$masked" ] || [ -L "$masked" ]; }; then
-    if [ -d "$RETIRED_SYMPHONY_ROLLBACK_DIR" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR" ] &&
-      { { [ -f "$RETIRED_SYMPHONY_ROLLBACK_DIR/unit" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR/unit" ]; } ||
-        { [ -f "$RETIRED_SYMPHONY_ROLLBACK_DIR/masked" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR/masked" ]; }; } &&
-      [ -f "$RETIRED_SYMPHONY_ROLLBACK_DIR/enablement" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR/enablement" ] &&
-      [ -f "$RETIRED_SYMPHONY_ROLLBACK_DIR/activity" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR/activity" ]; then
-      return 0
-    fi
+  local mode="" from_live=false state activity
+  if [ -L "$source" ] || [ -L "$masked" ]; then
+    log "ERROR: invalid legacy Symphony update snapshot"
+    return 1
+  fi
+  if [ -f "$source" ] && [ -f "$masked" ]; then
+    log "ERROR: ambiguous legacy Symphony update snapshot"
+    return 1
+  elif [ -f "$source" ]; then
+    mode=unit
+  elif [ -f "$masked" ]; then
+    mode=masked
+  # A prior retirement attempt may have stopped or disabled the unit already.
+  # Keep the first snapshot, which records its original rollback state.
+  elif [ -d "$RETIRED_SYMPHONY_ROLLBACK_DIR" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR" ] &&
+    { { [ -f "$RETIRED_SYMPHONY_ROLLBACK_DIR/unit" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR/unit" ] &&
+        [ ! -e "$RETIRED_SYMPHONY_ROLLBACK_DIR/masked" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR/masked" ]; } ||
+      { [ -f "$RETIRED_SYMPHONY_ROLLBACK_DIR/masked" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR/masked" ] &&
+        [ ! -e "$RETIRED_SYMPHONY_ROLLBACK_DIR/unit" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR/unit" ]; }; } &&
+    [ -f "$RETIRED_SYMPHONY_ROLLBACK_DIR/enablement" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR/enablement" ] &&
+    [ -f "$RETIRED_SYMPHONY_ROLLBACK_DIR/activity" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR/activity" ]; then
+    return 0
+  elif [ -e "$RETIRED_SYMPHONY_ROLLBACK_DIR" ] || [ -L "$RETIRED_SYMPHONY_ROLLBACK_DIR" ]; then
+    log "ERROR: invalid legacy Symphony rollback snapshot"
+    return 1
+  # The old updater removes its transaction before restarting into this new
+  # script. The installed unit is still present, so snapshot it on first boot.
+  elif [ -L "$installed_unit" ]; then
+    [ "$(readlink "$installed_unit")" = /dev/null ] ||
+      { log "ERROR: invalid legacy Symphony installed unit symlink"; return 1; }
+    mode=masked
+    from_live=true
+  elif [ -f "$installed_unit" ]; then
+    mode=unit
+    source="$installed_unit"
+    from_live=true
+  elif [ -e "$installed_unit" ]; then
+    log "ERROR: invalid legacy Symphony installed unit"
+    return 1
+  else
     log "ERROR: legacy Symphony rollback source is unavailable"
     return 1
   fi
+  if [ "$from_live" = true ]; then
+    state="$(sudo systemctl is-enabled matrix-symphony.service 2>/dev/null || true)"
+    case "$state" in
+      enabled|enabled-runtime|disabled|masked|masked-runtime|static|indirect|generated|transient) ;;
+      *) log "ERROR: could not snapshot legacy Symphony enablement"; return 1 ;;
+    esac
+    activity="$(sudo systemctl is-active matrix-symphony.service 2>/dev/null || true)"
+    case "$activity" in
+      active|activating|reloading) activity=active ;;
+      inactive|failed|unknown) activity=inactive ;;
+      *) log "ERROR: could not snapshot legacy Symphony activity"; return 1 ;;
+    esac
+    if [ "$mode" = masked ] && { [ "$state" != masked ] || [ "$activity" != inactive ]; }; then
+      log "ERROR: legacy Symphony mask state cannot be safely restored"
+      return 1
+    fi
+  fi
   sudo rm -rf -- "$incoming" || return 1
   sudo install -d -o root -g matrix -m 0750 "$incoming" || return 1
-  if [ -f "$masked" ] && [ ! -L "$masked" ]; then
-    sudo install -o root -g matrix -m 0640 "$masked" "$incoming/masked" || return 1
+  if [ "$mode" = masked ]; then
+    if [ "$from_live" = true ]; then
+      sudo install -o root -g matrix -m 0640 /dev/null "$incoming/masked" || return 1
+    else
+      sudo install -o root -g matrix -m 0640 "$masked" "$incoming/masked" || return 1
+    fi
   else
     sudo install -o root -g matrix -m 0640 "$source" "$incoming/unit" || return 1
   fi
-  sudo install -o root -g matrix -m 0640 "$UPDATE_TRANSACTION_DIR/systemd.enablement" "$incoming/enablement" || return 1
-  sudo install -o root -g matrix -m 0640 "$UPDATE_TRANSACTION_DIR/systemd.activity" "$incoming/activity" || return 1
+  if [ "$from_live" = true ]; then
+    sudo install -o root -g matrix -m 0640 /dev/null "$incoming/enablement" || return 1
+    sudo install -o root -g matrix -m 0640 /dev/null "$incoming/activity" || return 1
+    printf 'matrix-symphony.service:%s\n' "$state" | sudo tee "$incoming/enablement" >/dev/null || return 1
+    printf 'matrix-symphony.service:%s\n' "$activity" | sudo tee "$incoming/activity" >/dev/null || return 1
+  else
+    sudo install -o root -g matrix -m 0640 "$UPDATE_TRANSACTION_DIR/systemd.enablement" "$incoming/enablement" || return 1
+    sudo install -o root -g matrix -m 0640 "$UPDATE_TRANSACTION_DIR/systemd.activity" "$incoming/activity" || return 1
+  fi
   if [ -L "$RETIRED_SYMPHONY_ROLLBACK_DIR" ] ||
     { [ -e "$RETIRED_SYMPHONY_ROLLBACK_DIR" ] && [ ! -d "$RETIRED_SYMPHONY_ROLLBACK_DIR" ]; }; then
     log "ERROR: legacy Symphony rollback destination has an invalid file type"
