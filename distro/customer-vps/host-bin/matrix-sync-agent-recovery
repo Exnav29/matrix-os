@@ -86,6 +86,15 @@ restore_retired_symphony_after_rollback() {
   fi
 }
 
+clear_retired_symphony_rollback_after_rollback() {
+  [ -x "$APP_DIR/packages/symphony-elixir/release/bin/symphony" ] || return 0
+  if [ ! -e "$RETIRED_SYMPHONY_ROLLBACK_DIR" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR" ]; then
+    return 0
+  fi
+  [ -d "$RETIRED_SYMPHONY_ROLLBACK_DIR" ] && [ ! -L "$RETIRED_SYMPHONY_ROLLBACK_DIR" ] || return 1
+  sudo rm -rf -- "$RETIRED_SYMPHONY_ROLLBACK_DIR"
+}
+
 recover_interrupted_update() {
   local phase version="" transaction_state=""
   [ -f "$UPDATE_PHASE_MARKER" ] && [ ! -L "$UPDATE_PHASE_MARKER" ] || return 0
@@ -229,6 +238,7 @@ do_rollback() {
   done
   if [ "$healthy" = true ]; then
     cleanup_update_transaction
+    clear_retired_symphony_rollback_after_rollback || return 1
     log "Rollback complete (now at $(current_version))"
   else
     log "ERROR: rollback health check failed — services may be down"
