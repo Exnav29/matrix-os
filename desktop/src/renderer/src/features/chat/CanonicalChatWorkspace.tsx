@@ -1,3 +1,5 @@
+import { desktopProviderIdentityKey } from "../../lib/provider-settings-identity";
+import { canonicalComposerSelectionIsAvailable } from "./canonical-composer-state";
 import {
   isChatUnread,
   chatReadAction,
@@ -170,6 +172,8 @@ export function CanonicalChatWorkspace({
     : controller.activeChatId ?? initialChatId;
   const {
     text: draft,
+    revision: draftRevision,
+    updateIfUnchanged: updateDraftIfUnchanged,
     referenceTokens,
     requestIdentity: draftRequestIdentity,
     draftProjectId,
@@ -183,6 +187,12 @@ export function CanonicalChatWorkspace({
     chatId: routedComposerChatId,
     projectId,
     conversation: globalView === "conversation",
+  });
+  const draftScope = globalView === "conversation" && routedComposerChatId
+    ? `chat:${routedComposerChatId}` : `new:${projectId ?? "global"}`;
+  const composerOwner = useRef({ client, draftScope, draftRevision, identity: desktopProviderIdentityKey(useConnection.getState()) });
+  useLayoutEffect(() => {
+    composerOwner.current = { client, draftScope, draftRevision, identity: desktopProviderIdentityKey(useConnection.getState()) };
   });
   const mentionResources = referenceTokens.flatMap((token) => token.type === "resource" ? [token.resource] : []);
   const [query, setQuery] = useState("");
@@ -418,6 +428,7 @@ export function CanonicalChatWorkspace({
     const selectedInstance = providerCatalog.instances.find((instance) => instance.id === selection?.instanceId);
     if (
       !selection
+      || !canonicalComposerSelectionIsAvailable(providerCatalog, selection)
       || !mentionPermission.allowed
       || (activeRun && !mentionResources.length)
       || uploadingAttachments
@@ -430,11 +441,20 @@ export function CanonicalChatWorkspace({
     }
     setSubmissionError(null);
     const runtimeGeneration = captureRuntimeGeneration();
+    const providerCatalogGeneration = useConnection.getState().providerCatalogGeneration;
     const sequence = ++submissionSequence.current;
-    const isCurrentSubmission = () => (
+    const owner = composerOwner.current;
+    const isCurrentOwner = () => (
       sequence === submissionSequence.current
       && isCurrentRuntimeGeneration(runtimeGeneration)
+      && composerOwner.current.client === owner.client
+      && composerOwner.current.draftScope === owner.draftScope
+      && desktopProviderIdentityKey(useConnection.getState()) === owner.identity
     );
+    const isCurrentSubmission = () => isCurrentOwner()
+      && composerOwner.current.draftRevision === draftRevision
+      && useConnection.getState().providerCatalogGeneration === providerCatalogGeneration;
+    const submittedAttachmentIds = attachments.items.map((item) => item.localId);
     setUploadingAttachments(true);
     try {
       const parts = await resolveSubmissionParts(submission, isCurrentSubmission);
@@ -452,11 +472,18 @@ export function CanonicalChatWorkspace({
       const requestScope = routedComposerChatId ?? `new:${projectId ?? "global"}`;
       const attempt = mentionResources.length ? mentionRequests.resolve(client, requestScope, input, "send") : undefined;
       const clientRequestId = attempt?.clientRequestId;
+      const acknowledgeAccepted = () => {
+        if (!isCurrentRuntimeGeneration(runtimeGeneration)
+          || composerOwner.current.client !== owner.client
+          || desktopProviderIdentityKey(useConnection.getState()) !== owner.identity) return;
+        if (clientRequestId) mentionRequests.accepted(requestScope, clientRequestId);
+        updateDraftIfUnchanged(draftRevision, { text: "", referenceTokens: [] });
+        for (const id of submittedAttachmentIds) attachments.remove(id);
+      };
       const admitted = attempt?.operation === "queue"
-        ? await controller.queueTurn({ ...input, clientRequestId })
-        : await controller.submitTurn({ ...input, clientRequestId }, canonicalChatTitle(submission), draftProjectId ?? projectId);
-      if (admitted && clientRequestId) mentionRequests.accepted(requestScope, clientRequestId);
-      if (!admitted || !isCurrentSubmission()) return;
+        ? await controller.queueTurn({ ...input, clientRequestId }, acknowledgeAccepted)
+        : await controller.submitTurn({ ...input, clientRequestId }, canonicalChatTitle(submission), draftProjectId ?? projectId, acknowledgeAccepted);
+      if (!admitted || !isCurrentOwner()) return;
       if ("record" in admitted) {
         reportedChatId.current = admitted.record.chat.id;
         const admittedProjectId = admitted.record.projectId ?? null;
@@ -468,9 +495,6 @@ export function CanonicalChatWorkspace({
         setGlobalView("conversation");
         setDraftProjectId(admittedProjectId);
       }
-      setDraft("");
-      setReferenceTokens([]);
-      attachments.clear();
     } finally {
       if (sequence === submissionSequence.current) setUploadingAttachments(false);
     }
@@ -482,32 +506,38 @@ export function CanonicalChatWorkspace({
       (!activeRun && !editingQueuedTurn && !mentionResources.length)
       || !controller.detail
       || !selection
+      || !canonicalComposerSelectionIsAvailable(providerCatalog, selection)
       || !mentionPermission.allowed
       || composerAction
       || uploadingAttachments
       || (attachments.items.length > 0 && !supportsNativeFileAttachments(selectedInstance))
     ) return;
     const runtimeGeneration = captureRuntimeGeneration();
+    const providerCatalogGeneration = useConnection.getState().providerCatalogGeneration;
     const sequence = ++submissionSequence.current;
-    const isCurrentSubmission = () => (
+    const owner = composerOwner.current;
+    const isCurrentOwner = () => (
       sequence === submissionSequence.current
       && isCurrentRuntimeGeneration(runtimeGeneration)
+      && composerOwner.current.client === owner.client
+      && composerOwner.current.draftScope === owner.draftScope
+      && desktopProviderIdentityKey(useConnection.getState()) === owner.identity
     );
+    const isCurrentSubmission = () => isCurrentOwner()
+      && composerOwner.current.draftRevision === draftRevision
+      && useConnection.getState().providerCatalogGeneration === providerCatalogGeneration;
+    const submittedAttachmentIds = attachments.items.map((item) => item.localId);
     setComposerAction(editingQueuedTurn ? "edit" : "queue");
     setUploadingAttachments(true);
     try {
       const parts = await resolveSubmissionParts(submission, isCurrentSubmission);
       if (!parts) return;
-      const submittedDraft = draft;
-      const submittedReferenceTokens = referenceTokens;
       const updatedParts = editingQueuedTurn
         ? [
             ...editingQueuedTurn.parts.filter((part) => part.type !== "text"),
             ...parts,
           ]
         : parts;
-      setDraft("");
-      setReferenceTokens([]);
       const input = {
         parts: updatedParts,
         selection: { instanceId: selection.instanceId, model: selection.model, ...(selection.options.length ? { options: selection.options } : {}) },
@@ -516,19 +546,21 @@ export function CanonicalChatWorkspace({
       const requestScope = routedComposerChatId ?? `new:${projectId ?? "global"}`;
       const attempt = mentionResources.length ? mentionRequests.resolve(client, requestScope, input, "queue") : undefined;
       const clientRequestId = attempt?.clientRequestId;
+      const acknowledgeAccepted = () => {
+        if (!isCurrentRuntimeGeneration(runtimeGeneration)
+          || composerOwner.current.client !== owner.client
+          || desktopProviderIdentityKey(useConnection.getState()) !== owner.identity) return;
+        if (clientRequestId) mentionRequests.accepted(requestScope, clientRequestId);
+        updateDraftIfUnchanged(draftRevision, { text: "", referenceTokens: [] });
+        for (const id of submittedAttachmentIds) attachments.remove(id);
+      };
       const response = editingQueuedTurn
-        ? await controller.updateQueuedTurn(editingQueuedTurn.id, updatedParts)
+        ? await controller.updateQueuedTurn(editingQueuedTurn.id, updatedParts, acknowledgeAccepted)
         : attempt?.operation === "send"
-          ? await controller.submitTurn({ ...input, clientRequestId }, canonicalChatTitle(submission), draftProjectId ?? projectId)
-          : await controller.queueTurn({ ...input, clientRequestId });
-      if (response && clientRequestId) mentionRequests.accepted(requestScope, clientRequestId);
-      if (!isCurrentSubmission()) return;
-      if (!response) {
-        setDraft(submittedDraft);
-        setReferenceTokens(submittedReferenceTokens);
-        return;
-      }
-      attachments.clear();
+          ? await controller.submitTurn({ ...input, clientRequestId }, canonicalChatTitle(submission), draftProjectId ?? projectId, acknowledgeAccepted)
+          : await controller.queueTurn({ ...input, clientRequestId }, acknowledgeAccepted);
+      if (!isCurrentOwner()) return;
+      if (!response) return;
       setEditingQueuedTurn(null);
     } finally {
       if (sequence === submissionSequence.current) {
@@ -652,7 +684,7 @@ export function CanonicalChatWorkspace({
         busy={Boolean(activeRun) || uploadingAttachments}
         submitWhileBusy={Boolean(activeRun)}
         disabled={controller.status === "loading" || uploadingAttachments || (!catalog && liveCatalog.status === "loading")}
-        canSubmit={Boolean(selection && mentionPermission.allowed && !uploadingAttachments && (
+        canSubmit={Boolean(canonicalComposerSelectionIsAvailable(providerCatalog, selection) && mentionPermission.allowed && !uploadingAttachments && (
           draft.trim() || referenceTokens.length > 0 || attachments.items.length > 0
         ))}
         catalog={providerCatalog}
