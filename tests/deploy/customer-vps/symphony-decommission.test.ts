@@ -41,6 +41,10 @@ describe("retiring the legacy Symphony runtime", () => {
     expect(Object.keys(manifest).some((path) => path.startsWith("apps/symphony/"))).toBe(false);
   });
 
+  it("removes the retired Elixir source package", () => {
+    expect(existsSync("packages/symphony-elixir")).toBe(false);
+  });
+
   it("retries retirement after an interrupted or partially successful update", () => {
     expect(syncAgent).toContain('maybe_retire_legacy_symphony()');
     expect(syncAgent).toContain('[ -x "$APP_DIR/packages/symphony-elixir/release/bin/symphony" ] && return 0');
