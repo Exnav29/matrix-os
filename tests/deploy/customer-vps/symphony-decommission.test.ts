@@ -35,6 +35,12 @@ describe("retiring the legacy Symphony runtime", () => {
     expect(bundle).not.toContain('"$STAGE_DIR/bin/matrix-symphony"');
   });
 
+  it("does not ship the retired first-party app", () => {
+    expect(existsSync("home/apps/symphony")).toBe(false);
+    const manifest = JSON.parse(readFileSync("home/.template-manifest.json", "utf8")) as Record<string, string>;
+    expect(Object.keys(manifest).some((path) => path.startsWith("apps/symphony/"))).toBe(false);
+  });
+
   it("retries retirement after an interrupted or partially successful update", () => {
     expect(syncAgent).toContain('maybe_retire_legacy_symphony()');
     expect(syncAgent).toContain('[ -x "$APP_DIR/packages/symphony-elixir/release/bin/symphony" ] && return 0');
