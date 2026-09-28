@@ -6,8 +6,14 @@ service in current bundles.
 
 When an existing VPS installs the retirement bundle, the sync agent stops and
 disables the old `matrix-symphony.service` after the new gateway and shell pass
-their health checks. It removes the OS-owned systemd unit. An unsuccessful
-update restores the previous service state through the normal rollback path.
+their health checks. It removes the OS-owned systemd unit. Failures before the
+new release metadata is committed use the normal rollback path, which restores
+the previous service state. Once that metadata is committed, a later retirement,
+Hermes reconciliation, or credential-cleanup error can leave the update marked
+failed while the new bundle remains installed and Symphony stays stopped.
+Recovery finalizes that committed bundle; restoring the older service then
+requires an explicit rollback.
+
 The sync agent retains an OS-owned unit and state backup at
 `/etc/matrix-symphony-rollback` so a later update attempt cannot erase the
 manual rollback path to an older bundle.
