@@ -169,6 +169,9 @@ async function readCodexModels(input: {
     const send = (message: unknown) => child.stdin.write(`${JSON.stringify(message)}\n`);
 
     child.once("error", () => requestFinish(new Error("Codex model catalog unavailable")));
+    // "exit" covers a child whose stdio is still held open by a descendant,
+    // where "close" alone could leave this attempt unsettled indefinitely.
+    child.once("exit", settleAfterExit);
     child.once("close", settleAfterExit);
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -219,6 +222,7 @@ function wait(ms: number): Promise<void> {
 async function fetchCodexModelsWithRetry(input: {
   executable: string;
   cwd: string;
+  environment?: Record<string, string>;
   timeoutMs: number;
   maxAttempts: number;
   retryDelayMs: number;
@@ -230,6 +234,7 @@ async function fetchCodexModelsWithRetry(input: {
       const raw = await readCodexModels({
         executable: input.executable,
         cwd: input.cwd,
+        environment: input.environment,
         timeoutMs: input.timeoutMs,
         spawnProcess: input.spawnProcess,
       });

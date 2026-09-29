@@ -66,7 +66,11 @@ describe("Codex model catalog projection", () => {
     try {
       const spawnProcess = vi.fn(() => {
         const child = Object.assign(new EventEmitter(), {
-          stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(),
+          stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+          kill: vi.fn(() => {
+            queueMicrotask(() => child.emit("close", 0, null));
+            return true;
+          }),
         });
         child.stdin.on("data", (chunk: Buffer) => {
           const message = JSON.parse(chunk.toString()) as { id?: number };
@@ -156,7 +160,7 @@ describe("Codex model catalog projection", () => {
   });
 });
 
-const codexProvider = { id: "codex", kind: "codex" } as Parameters<
+const codexProvider = { id: "codex", kind: "codex", availability: "available" } as Parameters<
   ReturnType<typeof createCodexModelCatalogSource>
 >[0];
 
@@ -218,6 +222,31 @@ describe("Codex model catalog source retry and cache behavior", () => {
     attempts[0]!.child.emit("close", 0, null);
     await vi.waitFor(() => expect(attempts.length).toBe(2));
     respondWithRealCatalog(attempts[1]!.stdout, attempts[1]!.writes);
+    await vi.waitFor(() => expect(attempts[1]!.kill).toHaveBeenCalledWith("SIGTERM"));
+    attempts[1]!.child.emit("close", 0, null);
+
+    await expect(resultPromise).resolves.toMatchObject({ models: [{ id: "gpt-5.6-sol" }] });
+  });
+
+  it("settles an attempt on exit even when a descendant keeps stdio open", async () => {
+    const attempts: ReturnType<typeof fakeCodexChild>[] = [];
+    const spawnProcess = vi.fn(() => {
+      const attempt = fakeCodexChild({ autoCloseOnKill: false });
+      attempts.push(attempt);
+      return attempt.child as never;
+    });
+    const source = createCodexModelCatalogSource({
+      executable: "/opt/matrix/runtime/node/bin/codex",
+      cwd: "/home/matrix/home",
+      maxAttempts: 1,
+      spawnProcess,
+    });
+
+    const resultPromise = source(codexProvider);
+    await vi.waitFor(() => expect(attempts.length).toBe(1));
+    respondWithRealCatalog(attempts[0]!.stdout, attempts[0]!.writes);
+    await vi.waitFor(() => expect(attempts[0]!.kill).toHaveBeenCalledWith("SIGTERM"));
+    attempts[0]!.child.emit("exit", null, "SIGTERM");
 
     await expect(resultPromise).resolves.toMatchObject({ models: [{ id: "gpt-5.6-sol" }] });
   });
