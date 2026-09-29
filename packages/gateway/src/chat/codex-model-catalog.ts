@@ -16,6 +16,15 @@ const DEFAULT_CACHE_TTL_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 2;
 const DEFAULT_RETRY_DELAY_MS = 300;
 const DEFAULT_TERMINATE_GRACE_MS = 1_000;
+
+// Raised when an app-server never reports exit even after SIGKILL. Retrying
+// then could overlap a still-live child, so the lookup fails without retrying.
+class CodexCatalogChildExitTimeoutError extends Error {
+  constructor() {
+    super("Codex model catalog process did not exit");
+    this.name = "CodexCatalogChildExitTimeoutError";
+  }
+}
 // A failed lookup is cached only briefly. Long enough that repeated polling
 // (e.g. an open Chat tab) cannot retry-storm a down or mid-install Codex
 // with a fresh spawn+retry sequence on every request; short enough that a
@@ -123,6 +132,7 @@ async function readCodexModels(input: {
   cwd: string;
   environment?: Record<string, string>;
   timeoutMs: number;
+  terminateGraceMs: number;
   spawnProcess: SpawnProcess;
 }): Promise<unknown> {
   const child = input.spawnProcess(input.executable, ["app-server", "--stdio"], {
@@ -140,12 +150,14 @@ async function readCodexModels(input: {
     const timeout = setTimeout(() => requestFinish(new Error("Codex model catalog timed out")), input.timeoutMs);
     timeout.unref();
 
-    const settleAfterExit = () => {
+    const settleAfterExit = (forcedOutcome?: { error: Error }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       if (terminateTimer) clearTimeout(terminateTimer);
-      const outcome = requestedOutcome ?? { error: new Error("Codex model catalog stopped") };
+      const outcome: { error?: Error; value?: unknown } = forcedOutcome
+        ?? requestedOutcome
+        ?? { error: new Error("Codex model catalog stopped") };
       if (outcome.error) reject(outcome.error);
       else resolve(outcome.value);
     };
@@ -163,16 +175,26 @@ async function readCodexModels(input: {
       child.kill("SIGTERM");
       terminateTimer = setTimeout(() => {
         child.kill("SIGKILL");
-      }, DEFAULT_TERMINATE_GRACE_MS);
+        // Bound the wait even if the OS never reports exit, so the shared
+        // pending lookup cannot hang every later catalog request.
+        terminateTimer = setTimeout(() => {
+          settleAfterExit({ error: new CodexCatalogChildExitTimeoutError() });
+        }, input.terminateGraceMs);
+        terminateTimer.unref();
+      }, input.terminateGraceMs);
       terminateTimer.unref();
     };
     const send = (message: unknown) => child.stdin.write(`${JSON.stringify(message)}\n`);
 
     child.once("error", () => requestFinish(new Error("Codex model catalog unavailable")));
-    // "exit" covers a child whose stdio is still held open by a descendant,
-    // where "close" alone could leave this attempt unsettled indefinitely.
-    child.once("exit", settleAfterExit);
-    child.once("close", settleAfterExit);
+    // Once termination was requested, "exit" covers a child whose stdio is
+    // still held open by a descendant, where "close" alone could leave this
+    // attempt unsettled. Before that, wait for "close" so buffered stdout is
+    // still read.
+    child.once("exit", () => {
+      if (requestedOutcome) settleAfterExit();
+    });
+    child.once("close", () => settleAfterExit());
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       totalBytes += Buffer.byteLength(chunk, "utf8");
@@ -224,6 +246,7 @@ async function fetchCodexModelsWithRetry(input: {
   cwd: string;
   environment?: Record<string, string>;
   timeoutMs: number;
+  terminateGraceMs: number;
   maxAttempts: number;
   retryDelayMs: number;
   spawnProcess: SpawnProcess;
@@ -236,10 +259,12 @@ async function fetchCodexModelsWithRetry(input: {
         cwd: input.cwd,
         environment: input.environment,
         timeoutMs: input.timeoutMs,
+        terminateGraceMs: input.terminateGraceMs,
         spawnProcess: input.spawnProcess,
       });
       return normalizeCodexModelCatalog(raw);
     } catch (error) {
+      if (error instanceof CodexCatalogChildExitTimeoutError) throw error;
       lastError = error;
       // Sequential and bounded: the next attempt only starts once the
       // previous attempt's process has already been terminated inside
@@ -260,6 +285,7 @@ export function createCodexModelCatalogSource(options: {
   failureCacheTtlMs?: number;
   maxAttempts?: number;
   retryDelayMs?: number;
+  terminateGraceMs?: number;
   spawnProcess?: SpawnProcess;
 }) {
   const timeoutMs = Math.max(1, Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 30_000));
@@ -270,6 +296,10 @@ export function createCodexModelCatalogSource(options: {
   );
   const maxAttempts = Math.max(1, Math.min(options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS, 3));
   const retryDelayMs = Math.max(0, Math.min(options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS, 2_000));
+  const terminateGraceMs = Math.max(
+    1,
+    Math.min(options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS, 5_000),
+  );
   const spawnProcess = options.spawnProcess ?? (nodeSpawn as SpawnProcess);
   let cached: { expiresAt: number; value: CodingModelCatalogProjection } | null = null;
   let failedUntil = 0;
@@ -291,6 +321,7 @@ export function createCodexModelCatalogSource(options: {
         cwd: options.cwd,
         environment: options.environment,
         timeoutMs,
+        terminateGraceMs,
         maxAttempts,
         retryDelayMs,
         spawnProcess,

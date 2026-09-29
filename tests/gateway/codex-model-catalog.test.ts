@@ -251,6 +251,32 @@ describe("Codex model catalog source retry and cache behavior", () => {
     await expect(resultPromise).resolves.toMatchObject({ models: [{ id: "gpt-5.6-sol" }] });
   });
 
+  it("fails without retrying when an app-server never reports exit after SIGKILL", async () => {
+    const attempts: ReturnType<typeof fakeCodexChild>[] = [];
+    const spawnProcess = vi.fn(() => {
+      const attempt = fakeCodexChild({ autoCloseOnKill: false });
+      attempts.push(attempt);
+      return attempt.child as never;
+    });
+    const source = createCodexModelCatalogSource({
+      executable: "/opt/matrix/runtime/node/bin/codex",
+      cwd: "/home/matrix/home",
+      maxAttempts: 2,
+      retryDelayMs: 1,
+      terminateGraceMs: 5,
+      spawnProcess,
+    });
+
+    const resultPromise = source(codexProvider);
+    await vi.waitFor(() => expect(attempts.length).toBe(1));
+    attempts[0]!.child.emit("error", new Error("wedged"));
+
+    await expect(resultPromise).rejects.toThrow("Codex model catalog process did not exit");
+    expect(attempts[0]!.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(attempts[0]!.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+  });
+
   it("gives up after exhausting bounded retries without leaking any app-server child", async () => {
     const attempts: ReturnType<typeof fakeCodexChild>[] = [];
     const spawnProcess = vi.fn(() => {
