@@ -277,6 +277,47 @@ describe("Codex model catalog source retry and cache behavior", () => {
     expect(spawnProcess).toHaveBeenCalledTimes(1);
   });
 
+  it("does not spawn another app-server until an unconfirmed child finally exits", async () => {
+    let now = 1_000_000;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const attempts: ReturnType<typeof fakeCodexChild>[] = [];
+      const spawnProcess = vi.fn(() => {
+        const attempt = fakeCodexChild({ autoCloseOnKill: false });
+        attempts.push(attempt);
+        return attempt.child as never;
+      });
+      const source = createCodexModelCatalogSource({
+        executable: "/opt/matrix/runtime/node/bin/codex",
+        cwd: "/home/matrix/home",
+        maxAttempts: 1,
+        failureCacheTtlMs: 10,
+        terminateGraceMs: 250,
+        spawnProcess,
+      });
+
+      const first = source(codexProvider);
+      await vi.waitFor(() => expect(attempts.length).toBe(1));
+      attempts[0]!.child.emit("error", new Error("wedged"));
+      await expect(first).rejects.toThrow("Codex model catalog process did not exit");
+
+      now += 60_000;
+      await expect(source(codexProvider)).rejects.toThrow("Codex model catalog unavailable");
+      expect(spawnProcess).toHaveBeenCalledTimes(1);
+
+      attempts[0]!.child.emit("exit", null, "SIGKILL");
+      await Promise.resolve();
+      const recovered = source(codexProvider);
+      await vi.waitFor(() => expect(attempts.length).toBe(2));
+      respondWithRealCatalog(attempts[1]!.stdout, attempts[1]!.writes);
+      await vi.waitFor(() => expect(attempts[1]!.kill).toHaveBeenCalledWith("SIGTERM"));
+      attempts[1]!.child.emit("close", 0, null);
+      await expect(recovered).resolves.toMatchObject({ models: [{ id: "gpt-5.6-sol" }] });
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
   it("gives up after exhausting bounded retries without leaking any app-server child", async () => {
     const attempts: ReturnType<typeof fakeCodexChild>[] = [];
     const spawnProcess = vi.fn(() => {

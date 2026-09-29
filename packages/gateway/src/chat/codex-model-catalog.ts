@@ -18,9 +18,10 @@ const DEFAULT_RETRY_DELAY_MS = 300;
 const DEFAULT_TERMINATE_GRACE_MS = 1_000;
 
 // Raised when an app-server never reports exit even after SIGKILL. Retrying
-// then could overlap a still-live child, so the lookup fails without retrying.
+// then could overlap a still-live child, so the lookup fails without retrying
+// and the source refuses to spawn again until `exited` settles.
 class CodexCatalogChildExitTimeoutError extends Error {
-  constructor() {
+  constructor(readonly exited: Promise<void>) {
     super("Codex model catalog process did not exit");
     this.name = "CodexCatalogChildExitTimeoutError";
   }
@@ -141,6 +142,12 @@ async function readCodexModels(input: {
     stdio: "pipe",
   });
   child.stderr.resume();
+  // Registered before any other listener so a child that outlives the bounded
+  // termination wait is still observed when it finally exits.
+  const exited = new Promise<void>((resolve) => {
+    child.once("exit", () => resolve());
+    child.once("close", () => resolve());
+  });
   return await new Promise((resolve, reject) => {
     let buffer = "";
     let totalBytes = 0;
@@ -178,7 +185,7 @@ async function readCodexModels(input: {
         // Bound the wait even if the OS never reports exit, so the shared
         // pending lookup cannot hang every later catalog request.
         terminateTimer = setTimeout(() => {
-          settleAfterExit({ error: new CodexCatalogChildExitTimeoutError() });
+          settleAfterExit({ error: new CodexCatalogChildExitTimeoutError(exited) });
         }, input.terminateGraceMs);
         terminateTimer.unref();
       }, input.terminateGraceMs);
@@ -303,6 +310,7 @@ export function createCodexModelCatalogSource(options: {
   const spawnProcess = options.spawnProcess ?? (nodeSpawn as SpawnProcess);
   let cached: { expiresAt: number; value: CodingModelCatalogProjection } | null = null;
   let failedUntil = 0;
+  let unconfirmedChildExit: Promise<void> | null = null;
   let pending: Promise<CodingModelCatalogProjection> | null = null;
 
   return async (provider: AgentProviderSummary): Promise<CodingModelCatalogProjection | null> => {
@@ -312,7 +320,7 @@ export function createCodexModelCatalogSource(options: {
     if (provider.availability !== "available") return null;
     const now = Date.now();
     if (cached && cached.expiresAt > now) return cached.value;
-    if (!pending && failedUntil > now) {
+    if (!pending && (failedUntil > now || unconfirmedChildExit)) {
       throw new Error("Codex model catalog unavailable");
     }
     if (!pending) {
@@ -334,6 +342,14 @@ export function createCodexModelCatalogSource(options: {
         // so repeated polling while Codex is down or mid-install cannot
         // retry-storm it with a fresh spawn+retry sequence on every request.
         failedUntil = Date.now() + failureCacheTtlMs;
+        if (error instanceof CodexCatalogChildExitTimeoutError) {
+          // Never overlap an app-server whose termination is unconfirmed.
+          const exited = error.exited;
+          unconfirmedChildExit = exited;
+          void exited.then(() => {
+            if (unconfirmedChildExit === exited) unconfirmedChildExit = null;
+          });
+        }
         throw error;
       }).finally(() => {
         pending = null;
