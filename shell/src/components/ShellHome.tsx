@@ -54,6 +54,8 @@ function readRuntimeSlotFromLocation(): string | null {
 type ShellHomeProps = { initialCollaborationView?: ChatCollaborationView };
 
 export function ShellHome({ initialCollaborationView }: ShellHomeProps = {}) {
+  // Self-hosted documents render without ClerkProvider, so useAuth must never run there.
+  // react-doctor-disable-next-line react-doctor/no-hydration-branch-on-browser-global -- both sides read the same MATRIX_SELF_HOSTED flag: the server from its env, the client from the data-matrix-self-hosted attribute the root layout renders from that env
   if (isSelfHostedRuntime()) {
     return (
       <ShellHomeBody

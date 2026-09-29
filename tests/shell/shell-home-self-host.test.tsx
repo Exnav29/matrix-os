@@ -31,7 +31,9 @@ vi.mock("@matrix-os/observability/events", () => ({
   MATRIX_TELEMETRY_EVENTS: { SHELL_LOADED: "shell_loaded" },
 }));
 vi.mock("@/components/Desktop", () => ({
-  Desktop: () => <div data-testid="desktop">desktop</div>,
+  Desktop: ({ launchAppPath }: { launchAppPath: string | null }) => (
+    <div data-testid="desktop" data-launch={launchAppPath ?? ""}>desktop</div>
+  ),
 }));
 vi.mock("@/components/mobile/MobileShell", () => ({ MobileShell: () => null }));
 vi.mock("@/components/CommandPalette", () => ({ CommandPalette: () => null }));
@@ -55,5 +57,19 @@ describe("ShellHome self-host mode", () => {
     expect(() => render(<ShellHome />)).not.toThrow();
     expect(screen.getByTestId("desktop")).toBeTruthy();
     expect(clerk.useAuth).not.toHaveBeenCalled();
+  });
+
+  it("keeps collaboration routing in the standalone shell", () => {
+    render(<ShellHome initialCollaborationView={{ kind: "terminal", scopeId: "scope_1" }} />);
+    expect(screen.getByTestId("desktop").getAttribute("data-launch")).toBe("__terminal__");
+    expect(clerk.useAuth).not.toHaveBeenCalled();
+  });
+
+  it("still reads the Clerk session in managed mode", () => {
+    delete process.env.MATRIX_SELF_HOSTED;
+    clerk.useAuth.mockImplementationOnce(() => ({ userId: "user_1", sessionId: "sess_1" }));
+    render(<ShellHome />);
+    expect(screen.getByTestId("desktop")).toBeTruthy();
+    expect(clerk.useAuth).toHaveBeenCalled();
   });
 });

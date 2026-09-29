@@ -24,9 +24,9 @@ describe("self-host shell mode", () => {
     expect(layout).toContain("<ClerkProvider>");
     expect(layout).toContain("{renderDocument(true)}");
     expect(shellHome).toContain("if (isSelfHostedRuntime()) {");
-    expect(shellHome).toContain("return <ShellHomeBody userId={SELF_HOSTED_SHELL_USER_ID} />;");
-    expect(shellHome).toContain("function ClerkShellHome()");
-    expect(shellHome).toContain("const { userId } = useAuth();");
+    expect(shellHome).toContain("userId={SELF_HOSTED_SHELL_USER_ID}");
+    expect(shellHome).toContain("function ClerkShellHome(");
+    expect(shellHome).toContain("const { userId, sessionId } = useAuth();");
     expect(userButton).toContain("SelfHostedUserButton");
     expect(billingAccess).toContain("useManagedMatrixBillingAccess");
     expect(billingAccess).not.toContain("isSelfHostedDocument");
